@@ -34,6 +34,7 @@ public:
     struct State {
         std::optional<POINT> leftClick, rightClick, wheelPosition;
         int wheel = 0;
+        bool leftShift = false;
     };
 
 private:
@@ -56,7 +57,10 @@ private:
     void Record(UINT message, POINT at, int delta, bool lowLevel) {
         switch (message) {
         case WM_LBUTTONDOWN:
-            if (lowLevel || !lowLevelLeft) pending.leftClick = at;
+            if (lowLevel || !lowLevelLeft) {
+                pending.leftClick = at;
+                pending.leftShift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+            }
             lowLevelLeft |= lowLevel;
             break;
         case WM_RBUTTONDOWN:

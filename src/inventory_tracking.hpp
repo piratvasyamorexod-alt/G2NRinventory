@@ -98,6 +98,16 @@ oCItem* __fastcall TrackInsert(oCNpcInventory* inv, void* edx, oCItem* item) {
         if (node->GetData() == item) return InsertHook(inv, edx, item);
     }
     const int instance = item->GetInstance();
+    if (history.ForSale(instance) > 0 && inv->GetNumItemsInPackString() == 0) {
+        int owned = 0;
+        for (auto* node = inv->inventory.GetNextInList(); node; node = node->GetNextInList()) {
+            auto* existing = node->GetData();
+            if (existing && existing->GetInstance() == instance && !(existing->flags & ITM_FLAG_ACTIVE)) {
+                owned += std::clamp(existing->amount, 0, INT_MAX - owned);
+            }
+        }
+        history.CapForSale(instance, owned);
+    }
     auto* result = InsertHook(inv, edx, item);
     if (result) history.Acquire(instance);
     return result;

@@ -1,11 +1,13 @@
 #pragma once
 
 #include <algorithm>
+#include <cstdint>
+#include <string_view>
 #include <vector>
 
 namespace InventoryLayout {
 
-enum class Category { Recent, All, Weapons, Armor, Ammo, Magic, Supplies, Documents, Other, Count };
+enum class Category { Recent, All, Weapons, Armor, Ammo, Magic, Supplies, Documents, Other, Sale, Count };
 
 struct Box {
     int x = 0, y = 0, width = 0, height = 0;
@@ -19,7 +21,36 @@ struct Entry {
     Category category;
     int damage;
     int recentRank = -1;
+    int quantity = 0;
 };
+
+inline int AllocateSale(int amount, int& reserved) {
+    const int sale = (std::min)(amount, reserved);
+    reserved -= sale;
+    return sale;
+}
+
+inline int QuantityFromText(std::string_view digits, int maximum) {
+    std::int64_t quantity = 0;
+    for (const char digit : digits) {
+        if (digit < '0' || digit > '9') break;
+        quantity = quantity * 10 + digit - '0';
+        if (quantity >= maximum) return maximum;
+    }
+    return (std::max)(1, static_cast<int>(quantity));
+}
+
+inline int QuantityAt(Box slider, int x, int maximum) {
+    const int span = (std::max)(1, slider.width - 1);
+    const auto offset = static_cast<std::int64_t>(std::clamp(x - slider.x, 0, span));
+    return 1 + static_cast<int>((offset * (maximum - 1) + span / 2) / span);
+}
+
+inline int QuantityPosition(Box slider, int quantity, int maximum) {
+    if (maximum <= 1) return slider.x;
+    const auto span = static_cast<std::int64_t>((std::max)(0, slider.width - 1));
+    return slider.x + static_cast<int>(((quantity - 1) * span + (maximum - 1) / 2) / (maximum - 1));
+}
 
 inline void Sort(std::vector<Entry>& entries, Category category = Category::All) {
     if (category == Category::Recent) {

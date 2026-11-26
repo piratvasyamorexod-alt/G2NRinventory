@@ -2,6 +2,7 @@
 #include "../src/inventory_history.hpp"
 
 #include <cassert>
+#include <climits>
 #include <sstream>
 
 using namespace InventoryLayout;
@@ -29,6 +30,14 @@ int main() {
     history.MarkRead(20);
     history.Acquire(20);
     assert(history.WasRead(20) && !history.WasRead(21));
+    history.SetForSale(20, 15);
+    int reserved = history.ForSale(20);
+    assert(AllocateSale(4, reserved) == 4);
+    assert(AllocateSale(16, reserved) == 11);
+    assert(reserved == 0);
+    history.SetForSale(21, 2);
+    history.CapForSale(21, 1);
+    assert(history.ForSale(21) == 1);
     std::stringstream save;
     history.Save(save, [](int instance) { return "IT_TEST_" + std::to_string(instance); });
     save << "R MISSING_SYMBOL\n";
@@ -38,6 +47,14 @@ int main() {
     });
     assert((loaded.Recent() == std::vector<int>{120, 121}));
     assert(loaded.WasRead(120) && !loaded.WasRead(121) && !loaded.WasRead(20));
+    assert(loaded.ForSale(120) == 15 && loaded.ForSale(121) == 1);
+    loaded.ReconcileSale({{120, 7}});
+    assert(loaded.ForSale(120) == 7 && loaded.ForSale(121) == 0);
+    loaded.SetForSale(120, 7 - 7);
+    assert(!loaded.HasSale());
+    std::istringstream previousVersion("G2NRinventory 1\nR HERE\nD HERE\n");
+    loaded.Load(previousVersion, [](const std::string&) { return 5; });
+    assert(loaded.Rank(5) == 0 && loaded.WasRead(5) && !loaded.HasSale());
     for (int index = 100; index < 200; ++index) history.Acquire(index);
     assert(history.Recent().size() == InventoryHistory::History::MaximumRecent);
     assert(history.Rank(20) == -1 && history.Rank(199) == 0 && history.WasRead(20));
@@ -69,4 +86,15 @@ int main() {
     assert(nearEdges.Right() == 1899 && nearEdges.Bottom() == 1059);
     const auto tall = PlaceTooltip(viewport, 1800, 500, 480, 800, 16);
     assert(tall.Right() == 1784 && tall.y == viewport.y && tall.Bottom() <= viewport.Bottom());
+
+    const Box slider{100, 110, 201, 20};
+    assert(QuantityAt(slider, 50, 21) == 1);
+    assert(QuantityAt(slider, 200, 21) == 11);
+    assert(QuantityAt(slider, 400, 21) == 21);
+    assert(QuantityPosition(slider, 11, 21) == 200);
+    assert(QuantityPosition(slider, 1, 1) == 100);
+    assert(QuantityFromText("15", 20) == 15);
+    assert(QuantityFromText("100", 20) == 20);
+    assert(QuantityFromText("0", 20) == 1);
+    assert(QuantityFromText("9999999999", INT_MAX) == INT_MAX);
 }

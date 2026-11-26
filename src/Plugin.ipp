@@ -5,6 +5,7 @@
 #include "mouse_win32.hpp"
 
 #include <array>
+#include <climits>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -102,7 +103,7 @@ constexpr std::array<DamageLabel, NPC_ATR_MAX> AttributeLabels{{
 }};
 constexpr std::array<DamageLabel, CategoryCount> CategoryLabels{{
     {L"Последнее", "Recent"}, {L"Все", "All"}, {L"Оружие", "Weapons"}, {L"Броня", "Armor"}, {L"Снаряды", "Ammo"},
-    {L"Магия", "Magic"}, {L"Припасы", "Supplies"}, {L"Записи", "Notes"}, {L"Разное", "Other"}
+    {L"Магия", "Magic"}, {L"Припасы", "Supplies"}, {L"Записи", "Notes"}, {L"Разное", "Other"}, {L"На продажу", "For sale"}
 }};
 
 enum class Command { None, Use, Close };
@@ -111,6 +112,7 @@ class InventoryPanel {
     zCView panel{0, 0, 8192, 8192};
     zCView textView{0, 0, 8192, 8192};
     zCView tooltipText{0, 0, 8192, 8192};
+    zCView quantityText{0, 0, 8192, 8192};
     zCView solid{0, 0, 8, 8};
     zCView preview{0, 0, 8, 8};
     zCView cursor{0, 0, 8, 8};
@@ -130,6 +132,44 @@ class InventoryPanel {
     oCItem* tooltipItem = nullptr;
     int tooltipInstance = -1, tooltipTop = 0, tooltipMaxTop = 0;
     bool useSelection = false, cyrillic = true;
+
+    struct QuantityEdit {
+        oCItem* item;
+        int instance, maximum, amount;
+        POINT anchor;
+        bool returning;
+        bool typing = false, replaceText = false, dragging = false;
+        std::string digits;
+    };
+    std::optional<QuantityEdit> quantity;
+
+    struct QuantityBoxes { Box card, number, slider, confirm, cancel; };
+
+    QuantityBoxes QuantityLayout() const {
+        const int pad = 10, row = lineHeight + 6;
+        const int width = std::clamp(bounds.width * 3 / 5, 240, 345);
+        const Box viewport{2, 2, screen->psizex - 4, screen->psizey - 4};
+        const Box card = InventoryLayout::PlaceTooltip(viewport, quantity->anchor.x, quantity->anchor.y,
+                                                        width, 2 * pad + 5 * row, 14);
+        const int body = width - 2 * pad, left = card.x + pad, top = card.y + pad;
+        return {card, {left, top + 2 * row, body, row}, {left + 6, top + 3 * row, body - 12, row},
+                {left, top + 4 * row, body / 2 - 3, row},
+                {left + body / 2 + 3, top + 4 * row, body - body / 2 - 3, row}};
+    }
+
+    void MoveToSale(int instance, int amount, bool returning) {
+        const int previous = history.ForSale(instance);
+        history.SetForSale(instance, returning ? previous - amount
+            : previous + (std::min)(amount, INT_MAX - previous));
+    }
+
+    void ConfirmQuantity() {
+        const auto& edit = *quantity;
+        if (edit.typing && edit.digits.empty()) return;
+        const int amount = edit.typing ? InventoryLayout::QuantityFromText(edit.digits, edit.maximum) : edit.amount;
+        MoveToSale(edit.instance, amount, edit.returning);
+        quantity.reset();
+    }
 
     std::string Label(const wchar_t* ru, const char* en) const {
         if (!cyrillic) return en;
@@ -192,11 +232,12 @@ class InventoryPanel {
     Box Tab(int index) const {
         constexpr int firstRowTabs = 5;
         const bool lower = index >= firstRowTabs;
-        const int rowCount = lower ? CategoryCount - firstRowTabs : firstRowTabs;
         const int column = lower ? index - firstRowTabs : index;
         const int height = tabs.height / 2;
-        const int left = tabs.x + column * tabs.width / rowCount;
-        return {left, tabs.y + (lower ? height : 0), tabs.x + (column + 1) * tabs.width / rowCount - left, height};
+        constexpr std::array<int, 6> top{0, 26, 44, 62, 80, 100}, bottom{0, 18, 37, 55, 74, 100};
+        const auto& stops = lower ? bottom : top;
+        const int left = tabs.x + stops[column] * tabs.width / 100;
+        return {left, tabs.y + (lower ? height : 0), tabs.x + stops[column + 1] * tabs.width / 100 - left, height};
     }
 
     void ScrollBar(Box bar, int visible, int count, int top) {
@@ -252,7 +293,7 @@ class InventoryPanel {
         if (!line.empty()) lines.push_back({std::move(line), ink});
     }
 
-    std::vector<Line> ItemDetails(oCItem& item, int width) {
+    std::vector<Line> ItemDetails(oCItem& item, int amount, int width) {
         std::vector<Line> lines;
         const auto wrap = [&](std::string text, unsigned long ink = Paper) {
             if (cyrillic) Normalize(text);
@@ -331,16 +372,16 @@ class InventoryPanel {
                 || (hasRequirement(NPC_ATR_DEXTERITY, value) && label == Label(L"Необходимо ловкости", "Dexterity required")))) continue;
             wrap(value != 0 ? text + "  " + std::to_string(value) : text);
         }
-        if (item.amount > 1) add(L"В стопке", "Stack", item.amount);
+        if (amount > 1) add(L"В стопке", "Stack", amount);
         if (item.value > 0) {
-            if (item.amount > 1) add(L"Цена за штуку", "Value per item", item.value);
+            if (amount > 1) add(L"Цена за штуку", "Value per item", item.value);
             else add(L"Цена", "Value", item.value);
         }
         if (item.weight > 0) add(L"Вес", "Weight", item.weight);
         return lines;
     }
 
-    void DrawTooltip(oCItem* item, std::optional<POINT> point) {
+    void DrawTooltip(oCItem* item, int amount, std::optional<POINT> point) {
         const int instance = item ? item->GetInstance() : -1;
         if (tooltipItem != item || tooltipInstance != instance) {
             tooltipItem = item;
@@ -353,7 +394,7 @@ class InventoryPanel {
         const int cardWidth = (std::min)(std::clamp(screen->psizex * 2 / 5, 260, 480), screen->psizex / 2 - gap - 2);
         const int maxWidth = cardWidth - 2 * pad;
         const int maxRows = (screen->psizey * 3 / 4 - 2 * pad) / lineHeight;
-        const auto lines = ItemDetails(*item, maxWidth);
+        const auto lines = ItemDetails(*item, amount, maxWidth);
         if (lines.empty() || maxRows < 3) return;
         int width = 0;
         for (const auto& line : lines) width = (std::max)(width, Width(line.text));
@@ -385,6 +426,45 @@ class InventoryPanel {
         tooltipText.DrawItems();
     }
 
+    void DrawQuantity(std::optional<POINT> point) {
+        const auto& edit = *quantity;
+        const auto [card, number, slider, confirm, cancel] = QuantityLayout();
+        const auto alpha = zrenderer->GetAlphaBlendSource();
+        zrenderer->SetAlphaBlendSource(zRND_ALPHA_SOURCE_MATERIAL);
+        Fill(card, 0xFF202318);
+        Frame(card, Bronze);
+        const auto hit = [&](Box box) { return point && box.Hit(point->x, point->y); };
+        Fill(number, 0xFF141710);
+        Frame(number, edit.typing || hit(number) ? Bronze : Rule);
+        const int sliderY = slider.y + slider.height / 2;
+        const int amount = edit.typing ? InventoryLayout::QuantityFromText(edit.digits, edit.maximum) : edit.amount;
+        const int thumb = InventoryLayout::QuantityPosition(slider, amount, edit.maximum);
+        Fill({slider.x, sliderY - 2, slider.width, 4}, Rule);
+        Fill({slider.x, sliderY - 2, thumb - slider.x + 1, 4}, Bronze);
+        Fill({thumb - 3, sliderY - 7, 7, 14}, Bright);
+        Fill(confirm, 0xFF35351F);
+        Frame(confirm, hit(confirm) ? Bright : Bronze);
+        Frame(cancel, hit(cancel) ? Bright : Rule);
+        zrenderer->SetAlphaBlendSource(alpha);
+
+        Place(quantityText, card);
+        quantityText.ClrPrintwin();
+        const auto write = [&](Box area, const std::string& label, unsigned long ink, bool center = false) {
+            const int x = area.x + (center ? (std::max)(4, (area.width - Width(label)) / 2) : 4);
+            DrawText(quantityText, x, area.y + (area.height - lineHeight) / 2,
+                     label, area.Right() - x - 4, ink);
+        };
+        const int row = number.height;
+        write({number.x, number.y - 2 * row, number.width, row},
+              edit.returning ? Label(L"Вернуть в инвентарь", "Return to inventory") : Label(L"Отложить на продажу", "Set aside for sale"), Bronze);
+        write({number.x, number.y - row, number.width, row}, edit.item->name.ToChar(), Paper);
+        const auto current = edit.typing ? edit.digits + "|" : std::to_string(amount);
+        write(number, current + " / " + std::to_string(edit.maximum), Bright, true);
+        write(confirm, edit.returning ? Label(L"Вернуть", "Return") : Label(L"Отложить", "Set aside"), Bright, true);
+        write(cancel, Label(L"Отмена", "Cancel"), Paper, true);
+        quantityText.DrawItems();
+    }
+
 public:
     InventoryPanel() {
         InitSprite(panel, "G2NRI_PANEL.TGA", 248);
@@ -401,8 +481,10 @@ public:
         return index >= 0 && index < static_cast<int>(entries.size()) ? nativeItems[entries[index].nativeIndex] : nullptr;
     }
 
+    int Amount(int index) const { return Item(index) ? entries[index].quantity : 0; }
+
     bool SelectNative(oCNpcInventory& inv) const {
-        if (!Item(selected)) return false;
+        if (category == Category::Sale || quantity || !Item(selected)) return false;
         inv.selectedItem = entries[selected].nativeIndex;
         inv.CheckSelectedItem();
         return inv.GetSelectedItem() == Item(selected);
@@ -412,6 +494,7 @@ public:
         panel.SetFont(screen->GetFont());
         textView.SetFont(screen->GetFont());
         tooltipText.SetFont(screen->GetFont());
+        quantityText.SetFont(screen->GetFont());
         inset = std::clamp(screen->psizey / 80, 8, 20);
         lineHeight = (std::max)(12, panel.GetFont()->GetFontY()) + 4;
         const int margin = std::clamp(screen->psizex / 72, 10, 36);
@@ -442,6 +525,7 @@ public:
         entries.clear();
         counts.fill(0);
         std::array<bool, InventoryHistory::History::MaximumRecent> recentSeen{};
+        std::map<int, int> remainingSale, ownedForSale;
         bool foundCyrillic = false;
         for (auto* node = inv.contents->GetNextInList(); node; node = node->GetNextInList()) {
             auto* item = node->GetData();
@@ -449,19 +533,35 @@ public:
             nativeItems.push_back(item);
             if (!item || item->amount <= 0) continue;
             const auto categoryOfItem = Classify(*item);
-            const int rank = history.Rank(item->GetInstance());
-            const bool recent = rank >= 0 && !std::exchange(recentSeen[rank], true);
-            if (recent) ++counts[static_cast<int>(Category::Recent)];
-            ++counts[static_cast<int>(Category::All)];
-            ++counts[static_cast<int>(categoryOfItem)];
+            const int instance = item->GetInstance();
+            const int reserved = history.ForSale(instance);
+            int forSale = 0;
+            if (reserved > 0 && !(item->flags & ITM_FLAG_ACTIVE)) {
+                auto& owned = ownedForSale[instance];
+                owned += (std::min)(item->amount, INT_MAX - owned);
+                auto& remaining = remainingSale.try_emplace(instance, reserved).first->second;
+                forSale = InventoryLayout::AllocateSale(item->amount, remaining);
+            }
+            if (forSale > 0) ++counts[static_cast<int>(Category::Sale)];
+            const int available = item->amount - forSale;
+            const int rank = history.Rank(instance);
+            const bool recent = available > 0 && rank >= 0 && !std::exchange(recentSeen[rank], true);
+            if (available > 0) {
+                ++counts[static_cast<int>(Category::All)];
+                ++counts[static_cast<int>(categoryOfItem)];
+                if (recent) ++counts[static_cast<int>(Category::Recent)];
+            }
             if (!foundCyrillic) {
                 const std::string_view name(item->name.ToChar());
                 foundCyrillic = std::any_of(name.begin(), name.end(), [](unsigned char c) { return c >= 0xC0; });
             }
-            if (category == Category::All || category == categoryOfItem || (category == Category::Recent && recent)) {
-                entries.push_back({index, categoryOfItem, categoryOfItem == Category::Weapons ? WeaponDamage(*item) : 0, rank});
+            const bool matches = category == Category::All || category == categoryOfItem || (category == Category::Recent && recent);
+            const int amount = category == Category::Sale ? forSale : matches ? available : 0;
+            if (amount > 0) {
+                entries.push_back({index, categoryOfItem, categoryOfItem == Category::Weapons ? WeaponDamage(*item) : 0, rank, amount});
             }
         }
+        if (history.HasSale() && inv.GetNumItemsInPackString() == 0) history.ReconcileSale(ownedForSale);
         if (!nativeItems.empty()) cyrillic = foundCyrillic;
         InventoryLayout::Sort(entries, category);
         firstRow = std::clamp(firstRow, 0, grid.LastRow(static_cast<int>(entries.size())));
@@ -474,6 +574,17 @@ public:
         }
         SetSelection(match >= 0 ? match : selected, false);
         if (useSelection) SelectNative(inv);
+        if (quantity) {
+            const auto it = std::find_if(entries.begin(), entries.end(), [&](const Entry& entry) {
+                auto* item = nativeItems[entry.nativeIndex];
+                return item == quantity->item && item->GetInstance() == quantity->instance && !(item->flags & ITM_FLAG_ACTIVE);
+            });
+            if (it == entries.end()) quantity.reset();
+            else {
+                quantity->maximum = it->quantity;
+                quantity->amount = (std::min)(quantity->amount, quantity->maximum);
+            }
+        }
     }
 
     void ChangeCategory(int delta, oCNpcInventory& inv) {
@@ -494,7 +605,7 @@ public:
     }
 
     void Scroll(POINT p, int wheel) {
-        if (!wheel || !bounds.Hit(p.x, p.y)) return;
+        if (quantity || !wheel || !bounds.Hit(p.x, p.y)) return;
         if (tooltipMaxTop > 0 && (GetKeyState(VK_SHIFT) & 0x8000)) {
             auto* item = Item(ItemAt(p));
             if (item && item == tooltipItem && item->GetInstance() == tooltipInstance) {
@@ -505,7 +616,50 @@ public:
         firstRow = std::clamp(firstRow - wheel, 0, grid.LastRow(static_cast<int>(entries.size())));
     }
 
-    Command Click(POINT p, oCNpcInventory& inv) {
+    bool QuantityKey(int key, oCNpcInventory& inv) {
+        if (!quantity) return false;
+        Refresh(inv);
+        if (!quantity) return true;
+        if (key == KEY_ESCAPE) quantity.reset();
+        else if (key == KEY_RETURN || key == KEY_NUMPADENTER) ConfirmQuantity();
+        else if (quantity->typing) {
+            constexpr std::array<int, 10> numpad{KEY_NUMPAD0, KEY_NUMPAD1, KEY_NUMPAD2, KEY_NUMPAD3,
+                KEY_NUMPAD4, KEY_NUMPAD5, KEY_NUMPAD6, KEY_NUMPAD7, KEY_NUMPAD8, KEY_NUMPAD9};
+            int digit = -1;
+            if (key >= KEY_1 && key <= KEY_0) digit = (key - KEY_1 + 1) % 10;
+            else if (const auto it = std::find(numpad.begin(), numpad.end(), key); it != numpad.end()) {
+                digit = static_cast<int>(it - numpad.begin());
+            }
+            if (digit >= 0 || key == KEY_BACK || key == KEY_DELETE) {
+                if (std::exchange(quantity->replaceText, false) || key == KEY_DELETE) quantity->digits.clear();
+                else if (key == KEY_BACK && !quantity->digits.empty()) quantity->digits.pop_back();
+                if (digit >= 0 && quantity->digits.size() < 10) quantity->digits.push_back(static_cast<char>('0' + digit));
+            }
+        }
+        return true;
+    }
+
+    void DragQuantity(std::optional<POINT> point, bool down) {
+        if (!quantity || !quantity->dragging) return;
+        if (point) quantity->amount = InventoryLayout::QuantityAt(QuantityLayout().slider, point->x, quantity->maximum);
+        if (!down || !point) quantity->dragging = false;
+    }
+
+    Command Click(POINT p, bool shift, oCNpcInventory& inv) {
+        if (quantity) {
+            const auto [card, number, slider, confirm, cancel] = QuantityLayout();
+            if (confirm.Hit(p.x, p.y)) ConfirmQuantity();
+            else if (cancel.Hit(p.x, p.y)) quantity.reset();
+            else if (number.Hit(p.x, p.y)) {
+                if (!quantity->typing) quantity->digits = std::to_string(quantity->amount);
+                quantity->typing = quantity->replaceText = true;
+            } else if (slider.Hit(p.x, p.y)) {
+                quantity->typing = false;
+                quantity->dragging = true;
+                DragQuantity(p, true);
+            }
+            return Command::None;
+        }
         if (close.Hit(p.x, p.y)) return Command::Close;
         for (int i = 0; i < CategoryCount; ++i) {
             if (!Tab(i).Hit(p.x, p.y)) continue;
@@ -518,10 +672,20 @@ public:
             return Command::None;
         }
         const int index = ItemAt(p);
-        if (!Item(index)) return Command::None;
+        auto* item = Item(index);
+        if (!item) return Command::None;
         useSelection = true;
         SetSelection(index, false);
-        return Command::Use;
+        const bool returning = category == Category::Sale;
+        if (!shift) return returning ? Command::None : Command::Use;
+        if (item->flags & ITM_FLAG_ACTIVE) return Command::None;
+        const int instance = item->GetInstance(), amount = Amount(index);
+        if (amount == 1) MoveToSale(instance, amount, returning);
+        else if (amount > 1) {
+            quantity.emplace(QuantityEdit{item, instance, amount, amount, p, returning});
+            inv.SetHandleEventTop();
+        }
+        return Command::None;
     }
 
     void Draw(oCNpcInventory& inv, std::optional<POINT> point) {
@@ -547,9 +711,9 @@ public:
             if (active) Fill({cell.x + 5, cell.Bottom() - 2, cell.width - 10, 2}, Bronze);
         }
         if (entries.empty()) {
-            const auto message = category == Category::Recent
-                ? Label(L"Здесь появятся полученные предметы", "Newly acquired items will appear here")
-                : Label(L"Здесь пока пусто", "No items in this category");
+            auto message = Label(L"Здесь пока пусто", "No items in this category");
+            if (category == Category::Recent) message = Label(L"Здесь появятся полученные предметы", "Newly acquired items will appear here");
+            if (category == Category::Sale) message = Label(L"Shift + ЛКМ на вещи, чтобы отложить её", "Shift + click an item to set it aside");
             Text(grid.area.x + 5, grid.area.y + 6, message, grid.area.width - 10, Bronze);
         }
         const int first = firstRow * grid.columns, slots = grid.columns * grid.rows;
@@ -561,15 +725,18 @@ public:
             Fill(cell, equipped ? 0xFF292D1E : 0xFF1D2018);
             Frame(cell, index == hover ? Bright : index == selected && useSelection ? Bronze : Rule);
             if (!item) continue;
-            if (item->amount > 1) {
-                Text(cell.x + 3, cell.Bottom() - lineHeight, std::to_string(item->amount), cell.width - 7, Bright, true);
+            const int amount = Amount(index);
+            if (amount > 1) {
+                Text(cell.x + 3, cell.Bottom() - lineHeight, std::to_string(amount), cell.width - 7, Bright, true);
             }
         }
         ScrollBar(listBar, grid.rows, (static_cast<int>(entries.size()) + grid.columns - 1) / grid.columns, firstRow);
         const int footer = bounds.Bottom() - inset - lineHeight;
         Fill({left, footer - 5, tabs.width, 1}, Rule);
-        Text(left, footer, Label(L"ЛКМ / Enter  Использовать    Tab  Вкладка",
-                                 "Click / Enter  Use    Tab  Category"), tabs.width, Bronze);
+        const auto footerLabel = category == Category::Sale
+            ? Label(L"Shift + ЛКМ  Вернуть", "Shift + click  Return to inventory")
+            : Label(L"ЛКМ  Использовать    Shift + ЛКМ  Отложить", "Click  Use    Shift + click  Set aside");
+        Text(left, footer, footerLabel, tabs.width, Bronze);
         zrenderer->SetAlphaBlendSource(previousAlpha);
 
         oCItem::SetLightingSwell(FALSE);
@@ -581,7 +748,8 @@ public:
             // The native preview world can load a visual when the item is added to it.
             item->RenderItem(inv.rndWorld, &preview, 0.0f);
             if (!item->GetVisual()) {
-                const int labelWidth = cell.width - 10 - (item->amount > 1 ? Width(std::to_string(item->amount)) : 0);
+                const int amount = Amount(first + slot);
+                const int labelWidth = cell.width - 10 - (amount > 1 ? Width(std::to_string(amount)) : 0);
                 Text(cell.x + 4, cell.Bottom() - lineHeight, item->name.ToChar(), labelWidth, Paper);
             }
         }
@@ -600,7 +768,8 @@ public:
         }
         zrenderer->SetAlphaBlendSource(previousAlpha);
         textView.DrawItems();
-        DrawTooltip(Item(hover), point);
+        if (quantity) DrawQuantity(point);
+        else DrawTooltip(Item(hover), Amount(hover), point);
         if (point && cursor.backTex) {
             CURSORINFO info{};
             info.cbSize = sizeof(info);
@@ -666,6 +835,7 @@ public:
         if (events.TakeFocusLoss() || !InventoryMouse::HasFocus(window)) {
             ReleaseMouse();
             events.Discard();
+            panel.DragQuantity(std::nullopt, false);
         }
         if (!zinput || !InventoryMouse::HasFocus(window) || !InventoryMouse::ClientBounds(window, client)) {
             return Command::None;
@@ -683,13 +853,18 @@ public:
             active = true;
         }
         const auto input = events.Take();
-        if (ClickPoint(input.rightClick, VK_RBUTTON, rightHeld)) return Command::Close;
+        if (ClickPoint(input.rightClick, VK_RBUTTON, rightHeld)) {
+            if (!panel.QuantityKey(KEY_ESCAPE, inv)) return Command::Close;
+            return Command::None;
+        }
         const auto click = ClickPoint(input.leftClick, VK_LBUTTON, leftHeld);
         const auto wheel = ScreenPoint(input.wheelPosition);
+        panel.DragQuantity(Position(), (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0);
         if (!click && !(wheel && input.wheel)) return Command::None;
         panel.Layout();
         panel.Refresh(inv);
-        if (click) return panel.Click(*click, inv);
+        const bool shift = input.leftClick ? input.leftShift : (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+        if (click) return panel.Click(*click, shift, inv);
         panel.Scroll(*wheel, input.wheel);
         return Command::None;
     }
@@ -718,6 +893,7 @@ void UseSelected(oCNpcInventory& inv) {
 int __fastcall InventoryKey(oCNpcInventory* inv, void* edx, int key) {
     if (!session || !PersonalInventory(inv) || !zinput) return KeyHook(inv, edx, key);
     auto& panel = session->panel;
+    if (panel.QuantityKey(key, *inv)) return TRUE;
     const auto logical = zinput->GetFirstBindedLogicalKey(key);
     if (key == KEY_ESCAPE) {
         player->CloseInventory();
