@@ -246,15 +246,22 @@ class InventoryPanel {
         sprite.Blit();
     }
 
-    Box Tab(int index) const {
-        constexpr int firstRowTabs = 5;
-        const bool lower = index >= firstRowTabs;
-        const int column = lower ? index - firstRowTabs : index;
-        const int height = tabs.height / 2;
-        constexpr std::array<int, 6> top{0, 26, 44, 62, 80, 100}, bottom{0, 18, 37, 55, 74, 100};
-        const auto& stops = lower ? bottom : top;
-        const int left = tabs.x + stops[column] * tabs.width / 100;
-        return {left, tabs.y + (lower ? height : 0), tabs.x + stops[column + 1] * tabs.width / 100 - left, height};
+    void DrawTabs(Box area, Category current, const std::array<int, CategoryCount>& available,
+                  std::optional<POINT> point, bool hero = true) {
+        Fill({area.x, area.Bottom() - 1, area.width, 1}, Rule);
+        const int first = static_cast<int>(hero ? Category::Recent : Category::All);
+        const int end = static_cast<int>(hero ? Category::Count : Category::Sale);
+        for (int i = first; i < end; ++i) {
+            const auto tab = static_cast<Category>(i);
+            const auto cell = InventoryLayout::CategoryTab(area, tab, hero);
+            const auto& label = CategoryLabels[i];
+            const auto name = Label(label.ru, label.en);
+            const bool active = tab == current;
+            const int x = cell.x + (std::max)(2, (cell.width - Width(name)) / 2);
+            Text(x, cell.y, name, cell.Right() - x - 1,
+                 active || (point && cell.Hit(point->x, point->y)) ? Bright : available[i] ? Bronze : Paper);
+            if (active) Fill({cell.x + 5, cell.Bottom() - 2, cell.width - 10, 2}, Bronze);
+        }
     }
 
     void ScrollBar(Box bar, int visible, int count, int top) {
@@ -680,9 +687,8 @@ public:
             return Command::None;
         }
         if (close.Hit(p.x, p.y)) return Command::Close;
-        for (int i = 0; i < CategoryCount; ++i) {
-            if (!Tab(i).Hit(p.x, p.y)) continue;
-            ChangeCategory(i - static_cast<int>(category), inv);
+        if (const auto tab = InventoryLayout::CategoryAt(tabs, p.x, p.y)) {
+            ChangeCategory(static_cast<int>(*tab) - static_cast<int>(category), inv);
             return Command::None;
         }
         if (listBar.Hit(p.x, p.y)) {
@@ -718,17 +724,7 @@ public:
         const int left = bounds.x + inset;
         Text(left, close.y, Label(L"ИНВЕНТАРЬ", "INVENTORY"), close.x - left, Bronze);
         Text(close.x, close.y, "Esc", close.width, point && close.Hit(point->x, point->y) ? Bright : Bronze, true);
-        Fill({tabs.x, tabs.Bottom() - 1, tabs.width, 1}, Rule);
-        for (int i = 0; i < CategoryCount; ++i) {
-            const auto cell = Tab(i);
-            const auto& label = CategoryLabels[i];
-            const auto name = Label(label.ru, label.en);
-            const bool active = i == static_cast<int>(category);
-            const int x = cell.x + (std::max)(2, (cell.width - Width(name)) / 2);
-            Text(x, cell.y, name, cell.Right() - x - 1,
-                 active || (point && cell.Hit(point->x, point->y)) ? Bright : counts[i] ? Bronze : Paper);
-            if (active) Fill({cell.x + 5, cell.Bottom() - 2, cell.width - 10, 2}, Bronze);
-        }
+        DrawTabs(tabs, category, counts, point);
         if (entries.empty()) {
             auto message = Label(L"Здесь пока пусто", "No items in this category");
             if (category == Category::Recent) message = Label(L"Здесь появятся полученные предметы", "Newly acquired items will appear here");
@@ -882,7 +878,7 @@ public:
             trade.Layout();
             trade.Refresh(*dialog);
             if (wasConfirming && !trade.HasConfirmation()) return false;
-            if (click && trade.Click(*click)) return true;
+            if (click && trade.Click(*click, *dialog)) return true;
             if (wheel && input.wheel) trade.Scroll(*wheel, input.wheel);
         }
         trade.DragQuantity(Position(), (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0);

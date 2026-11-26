@@ -1,7 +1,9 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
+#include <optional>
 #include <string_view>
 #include <vector>
 
@@ -15,6 +17,31 @@ struct Box {
     int Bottom() const { return y + height; }
     bool Hit(int px, int py) const { return x <= px && px < Right() && y <= py && py < Bottom(); }
 };
+
+inline Box CategoryTab(Box tabs, Category category, bool hero = true) {
+    const int index = static_cast<int>(category) - (hero ? 0 : 1);
+    const int columns = hero ? 5 : 4;
+    const bool lower = index >= columns;
+    const int column = index % columns;
+    const int height = tabs.height / 2;
+    constexpr std::array<int, 6> top{0, 26, 44, 62, 80, 100}, bottom{0, 18, 37, 55, 74, 100};
+    const auto& stops = lower ? bottom : top;
+    const int start = hero ? stops[column] : column * 25;
+    const int end = hero ? stops[column + 1] : (column + 1) * 25;
+    const int left = tabs.x + start * tabs.width / 100;
+    return {left, tabs.y + (lower ? height : 0), tabs.x + end * tabs.width / 100 - left, height};
+}
+
+inline std::optional<Category> CategoryAt(Box tabs, int x, int y, bool hero = true) {
+    if (!tabs.Hit(x, y)) return std::nullopt;
+    const int first = static_cast<int>(hero ? Category::Recent : Category::All);
+    const int end = static_cast<int>(hero ? Category::Count : Category::Sale);
+    for (int i = first; i < end; ++i) {
+        const auto category = static_cast<Category>(i);
+        if (CategoryTab(tabs, category, hero).Hit(x, y)) return category;
+    }
+    return std::nullopt;
+}
 
 struct Entry {
     int nativeIndex;
@@ -52,16 +79,15 @@ inline int QuantityPosition(Box slider, int quantity, int maximum) {
     return slider.x + static_cast<int>(((quantity - 1) * span + (maximum - 1) / 2) / (maximum - 1));
 }
 
+inline bool ComesBefore(const Entry& a, const Entry& b, Category view) {
+    if (view == Category::Recent) return a.recentRank < b.recentRank;
+    if (a.category != b.category) return a.category < b.category;
+    return a.category == Category::Weapons && a.damage > b.damage;
+}
+
 inline void Sort(std::vector<Entry>& entries, Category category = Category::All) {
-    if (category == Category::Recent) {
-        std::stable_sort(entries.begin(), entries.end(), [](const Entry& a, const Entry& b) {
-            return a.recentRank < b.recentRank;
-        });
-        return;
-    }
-    std::stable_sort(entries.begin(), entries.end(), [](const Entry& a, const Entry& b) {
-        if (a.category != b.category) return a.category < b.category;
-        return a.category == Category::Weapons && a.damage > b.damage;
+    std::stable_sort(entries.begin(), entries.end(), [category](const Entry& a, const Entry& b) {
+        return ComesBefore(a, b, category);
     });
 }
 

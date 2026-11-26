@@ -16,12 +16,19 @@ oCViewDialogTrade* ActiveTrade() {
 }
 
 class TradePanel {
-    struct Slot { oCItem* item; int amount, price; };
+    struct Slot { oCItem* item; int price; Entry entry; };
     struct Lot { oCItem* item; int instance, amount, price; };
-    struct Side { Grid grid; Box scrollbar; std::vector<Slot> items; int firstRow = 0; };
+    struct Side {
+        Grid grid;
+        Box tabs, scrollbar;
+        std::vector<Slot> items;
+        std::array<int, CategoryCount> counts{};
+        Category category = Category::All;
+        int firstRow = 0;
+    };
     struct Choice { int side, index; };
     struct Deal {
-        bool buy, bulk;
+        bool buy, bulk, reserved;
         std::vector<Lot> lots;
         int amount = 1;
         std::size_t current = 0;
@@ -79,13 +86,13 @@ class TradePanel {
             status = ui.Label(L"Предмет не продаётся", "Item cannot be sold");
             return;
         }
-        const int limit = buy ? InventoryTrade::Affordable(slot->amount, slot->price, wallet)
-                              : InventoryTrade::Affordable(slot->amount, slot->price, INT_MAX - wallet);
+        const int limit = InventoryTrade::Affordable(slot->entry.quantity, slot->price, buy ? wallet : INT_MAX - wallet);
         if (limit <= 0) {
             status = buy ? ui.Label(L"Не хватает золота", "Not enough gold") : ui.Label(L"Достигнут предел золота", "Gold limit reached");
             return;
         }
-        deal.emplace(Deal{buy, false, {{slot->item, slot->item->GetInstance(), limit, slot->price}}});
+        const bool reserved = !buy && sides[choice.side].category == Category::Sale;
+        deal.emplace(Deal{buy, false, reserved, {{slot->item, slot->item->GetInstance(), limit, slot->price}}});
         status.clear();
     }
 
@@ -115,7 +122,7 @@ class TradePanel {
             if (!item || item->amount <= 0 || item->GetInstance() != lot.instance) continue;
             const int held = deal->buy || (item->flags & ITM_FLAG_ACTIVE) ? 0 : InventoryLayout::AllocateSale(item->amount, unassigned);
             if (item != lot.item) continue;
-            if (deal->bulk ? held <= 0 : item->amount <= held) return 0;
+            if (deal->reserved ? held <= 0 : item->amount <= held) return 0;
             selected = item;
             break;
         }
@@ -137,7 +144,7 @@ class TradePanel {
         const auto difference = Count(inv, lot.instance) - before;
         const auto moved = deal->buy ? difference : -difference;
         if (moved <= 0) return 0;
-        if (deal->bulk) {
+        if (deal->reserved) {
             history.SetForSale(lot.instance, reserved - static_cast<int>((std::min)(std::int64_t(reserved), moved)));
         }
         deal->moved += moved;
@@ -225,19 +232,22 @@ public:
         const int gap = std::clamp(screen->psizey / 360, 2, 5);
         const int pad = std::clamp(screen->psizey / 80, 8, 20);
         const int target = std::clamp(screen->psizey / 15, 40, 108);
-        const int width = (std::min)(screen->psizex * 94 / 100, 12 * (target + gap) + 5 * pad);
+        const int width = (std::min)(screen->psizex * 94 / 100, 13 * (target + gap) + 5 * pad);
         const int pane = (width - 5 * pad) / 2;
-        auto grid = InventoryLayout::MakeGrid({0, 0, pane, screen->psizey * 78 / 100 - 4 * h - 4 * pad}, target, gap);
-        const int height = grid.area.height + 4 * h + 4 * pad;
+        const int tabsHeight = 2 * (h + 5);
+        const int chrome = 4 * h + 4 * pad + tabsHeight + gap;
+        auto grid = InventoryLayout::MakeGrid({0, 0, pane, screen->psizey * 78 / 100 - chrome}, target, gap);
+        const int height = grid.area.height + chrome;
         ui.bounds = {(screen->psizex - width) / 2, (screen->psizey - height) / 2, width, height};
         Place(ui.panel, ui.bounds);
         Place(ui.textView, ui.bounds);
-        const int x = ui.bounds.x + pad, y = ui.bounds.y + 2 * h + 2 * pad;
+        const int x = ui.bounds.x + pad, tabsTop = ui.bounds.y + 2 * h + 2 * pad;
         for (int i = 0; i < 2; ++i) {
             grid.area.x = x + i * (pane + 3 * pad);
-            grid.area.y = y;
+            grid.area.y = tabsTop + tabsHeight + gap;
             sides[i].grid = grid;
-            sides[i].scrollbar = {grid.area.Right() + 1, y, pad, grid.area.height};
+            sides[i].tabs = {grid.area.x, tabsTop, pane, tabsHeight};
+            sides[i].scrollbar = {grid.area.Right() + 1, grid.area.y, pad, grid.area.height};
         }
         close = {ui.bounds.Right() - pad - ui.Width("Esc") - 9, ui.bounds.y + pad, ui.Width("Esc") + 9, h};
         footer = {x, ui.bounds.Bottom() - 2 * h - pad, width - 2 * pad, 2 * h};
@@ -257,10 +267,13 @@ public:
         marked.clear();
         wallet = 0;
         std::map<int, int> reserved;
+        std::array<bool, InventoryHistory::History::MaximumRecent> recentSeen{};
         bool cyrillic = false;
         for (int i = 0; i < 2; ++i) {
             auto& side = sides[i];
+            const bool hero = i == 1;
             side.items.clear();
+            side.counts.fill(0);
             for (auto* node = Container(dialog, i)->contents->GetNextInList(); node; node = node->GetNextInList()) {
                 auto* item = node->GetData();
                 if (!item || item->amount <= 0) continue;
@@ -270,22 +283,40 @@ public:
                 }
                 const int instance = item->GetInstance();
                 if (instance == currency) {
-                    if (i == 1) wallet += item->amount;
+                    if (hero) wallet += item->amount;
                     continue;
                 }
-                const int price = i == 0 ? (std::max)(0, item->GetValue()) : SellPrice(dialog, *item);
-                int amount = item->amount;
-                if (i == 1 && !(item->flags & ITM_FLAG_ACTIVE)) {
+                const int price = hero ? SellPrice(dialog, *item) : (std::max)(0, item->GetValue());
+                int held = 0;
+                if (hero && !(item->flags & ITM_FLAG_ACTIVE)) {
                     const int queued = history.ForSale(instance);
                     if (queued > 0) {
                         auto& remaining = reserved.try_emplace(instance, queued).first->second;
-                        const int count = InventoryLayout::AllocateSale(amount, remaining);
-                        amount -= count;
-                        if (count > 0 && price > 0) marked.push_back({item, instance, count, price});
+                        held = InventoryLayout::AllocateSale(item->amount, remaining);
+                        if (held > 0 && price > 0) marked.push_back({item, instance, held, price});
                     }
                 }
-                if (amount > 0) side.items.push_back({item, amount, price});
+                const int available = item->amount - held;
+                const auto kind = Classify(*item);
+                const int rank = hero ? history.Rank(instance) : -1;
+                const bool recent = available > 0 && rank >= 0 && !std::exchange(recentSeen[rank], true);
+                if (held > 0) ++side.counts[static_cast<int>(Category::Sale)];
+                if (available > 0) {
+                    ++side.counts[static_cast<int>(Category::All)];
+                    ++side.counts[static_cast<int>(kind)];
+                    if (recent) ++side.counts[static_cast<int>(Category::Recent)];
+                }
+                const bool matches = side.category == Category::All || side.category == kind
+                    || (side.category == Category::Recent && recent);
+                const int amount = side.category == Category::Sale ? held : matches ? available : 0;
+                if (amount > 0) {
+                    const int damage = kind == Category::Weapons ? WeaponDamage(*item) : 0;
+                    side.items.push_back({item, price, {0, kind, damage, rank, amount}});
+                }
             }
+            std::stable_sort(side.items.begin(), side.items.end(), [&](const Slot& a, const Slot& b) {
+                return InventoryLayout::ComesBefore(a.entry, b.entry, side.category);
+            });
             side.firstRow = std::clamp(side.firstRow, 0, side.grid.LastRow(static_cast<int>(side.items.size())));
         }
         ui.cyrillic = cyrillic;
@@ -297,7 +328,7 @@ public:
             });
             const auto gold = deal->buy ? wallet : INT_MAX - wallet;
             const int limit = match == slots.end() || match->price != lot.price
-                ? 0 : InventoryTrade::Affordable(match->amount, lot.price, gold);
+                ? 0 : InventoryTrade::Affordable(match->entry.quantity, lot.price, gold);
             if (limit < Quantity()) {
                 deal.reset();
                 status = ui.Label(L"Условия обмена изменились", "Trade terms changed");
@@ -323,7 +354,7 @@ public:
 
     bool HasConfirmation() const { return deal.has_value(); }
 
-    bool Click(POINT point) {
+    bool Click(POINT point, oCViewDialogTrade& dialog) {
         if (deal) {
             if (cancel.Hit(point.x, point.y)) return Back();
             if (!deal->started && confirm.Hit(point.x, point.y)) Confirm();
@@ -340,8 +371,20 @@ public:
             return false;
         }
         if (close.Hit(point.x, point.y)) return true;
+        for (int i = 0; i < 2; ++i) {
+            auto& side = sides[i];
+            if (const auto category = InventoryLayout::CategoryAt(side.tabs, point.x, point.y, i == 1)) {
+                if (side.category != *category) {
+                    side.category = *category;
+                    side.firstRow = 0;
+                    keyboard = Choice{i, 0};
+                    Refresh(dialog);
+                }
+                return false;
+            }
+        }
         if (bulkButton.Hit(point.x, point.y) && !marked.empty()) {
-            deal.emplace(Deal{false, true, marked});
+            deal.emplace(Deal{false, true, true, marked});
             status.clear();
         } else if (auto choice = Hit(point)) Begin(*choice);
         else for (auto& side : sides) {
@@ -427,6 +470,7 @@ public:
             const auto& side = sides[i];
             const auto title = i == 0 ? std::string(dialog.NpcLeft->name[0].ToChar()) : ui.Label(L"Вещи героя", "Your items");
             ui.Text(side.grid.area.x, top + h + 5, title, side.grid.area.width, Bronze);
+            ui.DrawTabs(side.tabs, side.category, side.counts, deal ? std::nullopt : point, i == 1);
             const int slots = side.grid.columns * side.grid.rows, first = side.firstRow * side.grid.columns;
             for (int slot = 0; slot < slots; ++slot) {
                 const auto cell = side.grid.Cell(slot);
@@ -436,8 +480,11 @@ public:
                 ui.Fill(cell, 0xFF1D2018);
                 ui.Frame(cell, hot ? Bright : selected ? Bronze : Rule);
                 const auto* entry = Item({i, index});
-                if (entry && entry->amount > 1) ui.Text(cell.x + 3, cell.Bottom() - h, std::to_string(entry->amount), cell.width - 7, Bright, true);
+                if (entry && entry->entry.quantity > 1) ui.Text(cell.x + 3, cell.Bottom() - h,
+                    std::to_string(entry->entry.quantity), cell.width - 7, Bright, true);
             }
+            if (side.items.empty()) ui.Text(side.grid.area.x + 6, side.grid.area.y + 5,
+                ui.Label(L"Здесь пока пусто", "No items in this category"), side.grid.area.width - 12, Bronze);
             ui.ScrollBar(side.scrollbar, side.grid.rows,
                          (static_cast<int>(side.items.size()) + side.grid.columns - 1) / side.grid.columns, side.firstRow);
         }
@@ -474,7 +521,7 @@ public:
             const auto price = hover->side == 1 && entry->price <= 0 ? ui.Label(L"Предмет не продаётся", "Item cannot be sold")
                 : (hover->side == 0 ? ui.Label(L"Покупка за штуку", "Buy per item") : ui.Label(L"Продажа за штуку", "Sell per item"))
                     + "  " + std::to_string(entry->price);
-            ui.DrawTooltip(entry->item, entry->amount, point, price);
+            ui.DrawTooltip(entry->item, entry->entry.quantity, point, price);
         } else ui.DrawTooltip(nullptr, 0, std::nullopt);
         ui.DrawCursor(point);
     }

@@ -89,6 +89,21 @@ int main() {
     assert(panel.x > 1920 / 2 && panel.Right() == 1920 - 26 && panel.y == 150);
     const auto compact = MakeGrid({0, 0, 557, 680}, 77, 3);
     assert(compact.columns == 7 && compact.rows == 8 && compact.size == 77);
+
+    const Box heroTabs{510, 110, 483, 50}, merchantTabs{12, 110, 483, 50};
+    for (int i = 0; i < static_cast<int>(Category::Count); ++i) {
+        const auto category = static_cast<Category>(i);
+        const auto tab = CategoryTab(heroTabs, category);
+        assert(CategoryAt(heroTabs, tab.x, tab.y) == category);
+        assert(CategoryAt(heroTabs, tab.Right() - 1, tab.Bottom() - 1) == category);
+        if (category == Category::Recent || category == Category::Sale) continue;
+        const auto stockTab = CategoryTab(merchantTabs, category, false);
+        assert(CategoryAt(merchantTabs, stockTab.x, stockTab.y, false) == category);
+        assert(CategoryAt(merchantTabs, stockTab.Right() - 1, stockTab.Bottom() - 1, false) == category);
+    }
+    assert(!CategoryAt(heroTabs, heroTabs.Right(), heroTabs.y));
+    assert(!CategoryAt(merchantTabs, merchantTabs.x, merchantTabs.Bottom(), false));
+
     const auto nearPointer = PlaceTooltip(viewport, 650, 400, 330, 160, 16);
     assert(nearPointer.x == 666 && nearPointer.y == 416);
     const auto nearEdges = PlaceTooltip(viewport, 1915, 1075, 330, 160, 16);
