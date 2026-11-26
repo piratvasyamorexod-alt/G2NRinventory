@@ -2,6 +2,7 @@
 
 #include "inventory_layout.hpp"
 #include "inventory_history.hpp"
+#include "inventory_trade_rules.hpp"
 #include "mouse_win32.hpp"
 
 #include <array>
@@ -9,6 +10,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <map>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -72,6 +74,20 @@ bool PersonalInventory(const oCItemContainer* container) {
     return true;
 }
 
+void EditQuantityDigits(std::string& digits, bool& replaceText, int key) {
+    constexpr std::array<int, 10> numpad{KEY_NUMPAD0, KEY_NUMPAD1, KEY_NUMPAD2, KEY_NUMPAD3,
+        KEY_NUMPAD4, KEY_NUMPAD5, KEY_NUMPAD6, KEY_NUMPAD7, KEY_NUMPAD8, KEY_NUMPAD9};
+    int digit = -1;
+    if (key >= KEY_1 && key <= KEY_0) digit = (key - KEY_1 + 1) % 10;
+    else if (const auto it = std::find(numpad.begin(), numpad.end(), key); it != numpad.end()) {
+        digit = static_cast<int>(it - numpad.begin());
+    }
+    if (digit < 0 && key != KEY_BACK && key != KEY_DELETE) return;
+    if (std::exchange(replaceText, false) || key == KEY_DELETE) digits.clear();
+    else if (key == KEY_BACK && !digits.empty()) digits.pop_back();
+    if (digit >= 0 && digits.size() < 10) digits.push_back(static_cast<char>('0' + digit));
+}
+
 void Place(zCView& view, Box box) {
     view.pposx = box.x;
     view.pposy = box.y;
@@ -109,6 +125,7 @@ constexpr std::array<DamageLabel, CategoryCount> CategoryLabels{{
 enum class Command { None, Use, Close };
 
 class InventoryPanel {
+    friend class TradePanel;
     zCView panel{0, 0, 8192, 8192};
     zCView textView{0, 0, 8192, 8192};
     zCView tooltipText{0, 0, 8192, 8192};
@@ -293,7 +310,7 @@ class InventoryPanel {
         if (!line.empty()) lines.push_back({std::move(line), ink});
     }
 
-    std::vector<Line> ItemDetails(oCItem& item, int amount, int width) {
+    std::vector<Line> ItemDetails(oCItem& item, int amount, int width, bool showValue) {
         std::vector<Line> lines;
         const auto wrap = [&](std::string text, unsigned long ink = Paper) {
             if (cyrillic) Normalize(text);
@@ -374,7 +391,7 @@ class InventoryPanel {
             wrap(value != 0 ? text + "  " + std::to_string(value) : text);
         }
         if (amount > 1) add(L"В стопке", "Stack", amount);
-        if (item.value > 0) {
+        if (showValue && item.value > 0) {
             if (amount > 1) add(L"Цена за штуку", "Value per item", item.value);
             else add(L"Цена", "Value", item.value);
         }
@@ -382,7 +399,7 @@ class InventoryPanel {
         return lines;
     }
 
-    void DrawTooltip(oCItem* item, int amount, std::optional<POINT> point) {
+    void DrawTooltip(oCItem* item, int amount, std::optional<POINT> point, const std::string& tradePrice = {}) {
         const int instance = item ? item->GetInstance() : -1;
         if (tooltipItem != item || tooltipInstance != instance) {
             tooltipItem = item;
@@ -395,7 +412,8 @@ class InventoryPanel {
         const int cardWidth = (std::min)(std::clamp(screen->psizex * 2 / 5, 260, 480), screen->psizex / 2 - gap - 2);
         const int maxWidth = cardWidth - 2 * pad;
         const int maxRows = (screen->psizey * 3 / 4 - 2 * pad) / lineHeight;
-        const auto lines = ItemDetails(*item, amount, maxWidth);
+        auto lines = ItemDetails(*item, amount, maxWidth, tradePrice.empty());
+        if (!tradePrice.empty()) lines.insert(lines.begin() + (lines.empty() ? 0 : 1), {tradePrice, Bronze});
         if (lines.empty() || maxRows < 3) return;
         int width = 0;
         for (const auto& line : lines) width = (std::max)(width, Width(line.text));
@@ -464,6 +482,19 @@ class InventoryPanel {
         write(confirm, edit.returning ? Label(L"Вернуть", "Return") : Label(L"Отложить", "Set aside"), Bright, true);
         write(cancel, Label(L"Отмена", "Cancel"), Paper, true);
         quantityText.DrawItems();
+    }
+
+    void DrawCursor(std::optional<POINT> point) {
+        if (!point || !cursor.backTex) return;
+        CURSORINFO info{};
+        info.cbSize = sizeof(info);
+        if (GetCursorInfo(&info) && (info.flags & CURSOR_SHOWING) && info.hCursor) return;
+        const int size = std::clamp(screen->psizey / 42, 16, 48);
+        const auto alpha = zrenderer->GetAlphaBlendSource();
+        zrenderer->SetAlphaBlendSource(zRND_ALPHA_SOURCE_MATERIAL);
+        Place(cursor, {static_cast<int>(point->x), static_cast<int>(point->y), size, size});
+        cursor.Blit();
+        zrenderer->SetAlphaBlendSource(alpha);
     }
 
 public:
@@ -623,20 +654,7 @@ public:
         if (!quantity) return true;
         if (key == KEY_ESCAPE) quantity.reset();
         else if (key == KEY_RETURN || key == KEY_NUMPADENTER) ConfirmQuantity();
-        else if (quantity->typing) {
-            constexpr std::array<int, 10> numpad{KEY_NUMPAD0, KEY_NUMPAD1, KEY_NUMPAD2, KEY_NUMPAD3,
-                KEY_NUMPAD4, KEY_NUMPAD5, KEY_NUMPAD6, KEY_NUMPAD7, KEY_NUMPAD8, KEY_NUMPAD9};
-            int digit = -1;
-            if (key >= KEY_1 && key <= KEY_0) digit = (key - KEY_1 + 1) % 10;
-            else if (const auto it = std::find(numpad.begin(), numpad.end(), key); it != numpad.end()) {
-                digit = static_cast<int>(it - numpad.begin());
-            }
-            if (digit >= 0 || key == KEY_BACK || key == KEY_DELETE) {
-                if (std::exchange(quantity->replaceText, false) || key == KEY_DELETE) quantity->digits.clear();
-                else if (key == KEY_BACK && !quantity->digits.empty()) quantity->digits.pop_back();
-                if (digit >= 0 && quantity->digits.size() < 10) quantity->digits.push_back(static_cast<char>('0' + digit));
-            }
-        }
+        else if (quantity->typing) EditQuantityDigits(quantity->digits, quantity->replaceText, key);
         return true;
     }
 
@@ -771,19 +789,11 @@ public:
         textView.DrawItems();
         if (quantity) DrawQuantity(point);
         else DrawTooltip(Item(hover), Amount(hover), point);
-        if (point && cursor.backTex) {
-            CURSORINFO info{};
-            info.cbSize = sizeof(info);
-            if (!GetCursorInfo(&info) || !(info.flags & CURSOR_SHOWING) || !info.hCursor) {
-                const int size = std::clamp(screen->psizey / 42, 16, 48);
-                zrenderer->SetAlphaBlendSource(zRND_ALPHA_SOURCE_MATERIAL);
-                Place(cursor, {static_cast<int>(point->x), static_cast<int>(point->y), size, size});
-                cursor.Blit();
-                zrenderer->SetAlphaBlendSource(previousAlpha);
-            }
-        }
+        DrawCursor(point);
     }
 };
+
+#include "inventory_trade.hpp"
 
 void ApplyMouseAcquisition() {
     reinterpret_cast<int(__cdecl*)()>(0x004D3D30)();
@@ -821,25 +831,15 @@ class InventorySession {
         return edge ? Position() : std::nullopt;
     }
 
-public:
-    InventoryPanel panel;
-
-    ~InventorySession() { ReleaseMouse(); }
-
-    std::optional<POINT> Position() const {
-        POINT point{};
-        if (!active || !InventoryMouse::HasFocus(window) || !GetCursorPos(&point)) return std::nullopt;
-        return ScreenPoint(point);
-    }
-
-    Command Poll(oCNpcInventory& inv) {
+    bool PrepareMouse() {
         if (events.TakeFocusLoss() || !InventoryMouse::HasFocus(window)) {
             ReleaseMouse();
             events.Discard();
             panel.DragQuantity(std::nullopt, false);
+            trade.DragQuantity(std::nullopt, false);
         }
         if (!zinput || !InventoryMouse::HasFocus(window) || !InventoryMouse::ClientBounds(window, client)) {
-            return Command::None;
+            return false;
         }
         if (!active) {
             if (!listening) listening = events.Start(window);
@@ -853,6 +853,45 @@ public:
             rightHeld = (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0;
             active = true;
         }
+        return true;
+    }
+
+public:
+    InventoryPanel panel;
+    TradePanel trade{panel};
+    oCViewDialogTrade* dialog = nullptr;
+
+    ~InventorySession() { ReleaseMouse(); }
+
+    bool HasFocus() const { return InventoryMouse::HasFocus(window); }
+
+    std::optional<POINT> Position() const {
+        POINT point{};
+        if (!active || !HasFocus() || !GetCursorPos(&point)) return std::nullopt;
+        return ScreenPoint(point);
+    }
+
+    bool PollTrade() {
+        if (!PrepareMouse()) return false;
+        const auto input = events.Take();
+        if (ClickPoint(input.rightClick, VK_RBUTTON, rightHeld)) return trade.Back();
+        const auto click = ClickPoint(input.leftClick, VK_LBUTTON, leftHeld);
+        const auto wheel = ScreenPoint(input.wheelPosition);
+        if (click || (wheel && input.wheel)) {
+            const bool wasConfirming = trade.HasConfirmation();
+            trade.Layout();
+            trade.Refresh(*dialog);
+            if (wasConfirming && !trade.HasConfirmation()) return false;
+            if (click && trade.Click(*click)) return true;
+            if (wheel && input.wheel) trade.Scroll(*wheel, input.wheel);
+        }
+        trade.DragQuantity(Position(), (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0);
+        trade.Pump(*dialog);
+        return false;
+    }
+
+    Command Poll(oCNpcInventory& inv) {
+        if (!PrepareMouse()) return Command::None;
         const auto input = events.Take();
         if (ClickPoint(input.rightClick, VK_RBUTTON, rightHeld)) {
             if (!panel.QuantityKey(KEY_ESCAPE, inv)) return Command::Close;
@@ -892,7 +931,7 @@ void UseSelected(oCNpcInventory& inv) {
 }
 
 int __fastcall InventoryKey(oCNpcInventory* inv, void* edx, int key) {
-    if (!session || !PersonalInventory(inv) || !zinput) return KeyHook(inv, edx, key);
+    if (!session || session->dialog || !PersonalInventory(inv) || !zinput) return KeyHook(inv, edx, key);
     auto& panel = session->panel;
     if (panel.QuantityKey(key, *inv)) return TRUE;
     const auto logical = zinput->GetFirstBindedLogicalKey(key);
@@ -924,12 +963,34 @@ int __fastcall InventoryKey(oCNpcInventory* inv, void* edx, int key) {
     }
 }
 
+int __fastcall TradeKey(oCViewDialogTrade*, void*, int);
+auto TradeKeyHook = Union::CreateHook(
+    SIGNATURE_OF(&oCViewDialogTrade::HandleEvent), &TradeKey, Union::HookType::Hook_Detours);
+
+int __fastcall TradeKey(oCViewDialogTrade* dialog, void* edx, int key) {
+    if (!session || session->dialog != dialog || ActiveTrade() != dialog) return TradeKeyHook(dialog, edx, key);
+    if (!session->HasFocus()) return TRUE;
+    const bool wasConfirming = session->trade.HasConfirmation();
+    if (key == KEY_RETURN || key == KEY_NUMPADENTER) session->trade.Refresh(*dialog);
+    if (wasConfirming && !session->trade.HasConfirmation()) return TRUE;
+    if (session->trade.Key(key)) dialog->OnKeyEsc();
+    return TRUE;
+}
+
 void __fastcall DrawInventory(oCItemContainer*, void*);
 auto DrawHook = Union::CreateHook(
     SIGNATURE_OF(&oCItemContainer::Draw), &DrawInventory, Union::HookType::Hook_Detours);
 
 void __fastcall DrawInventory(oCItemContainer* container, void* edx) {
-    if (session && PersonalInventory(container)) {
+    if (session && session->dialog && ActiveTrade() == session->dialog) {
+        auto& dialog = *session->dialog;
+        if (container == TradePanel::Container(dialog, 0)) return;
+        if (container == TradePanel::Container(dialog, 1)) {
+            session->trade.Draw(dialog, session->Position());
+            return;
+        }
+    }
+    if (session && !session->dialog && PersonalInventory(container)) {
         session->panel.Draw(player->inventory2, session->Position());
     } else {
         DrawHook(container, edx);
@@ -941,7 +1002,7 @@ auto CloseHook = Union::CreateHook(
     SIGNATURE_OF(&oCNpcInventory::Close), &CloseInventory, Union::HookType::Hook_Detours);
 
 void __fastcall CloseInventory(oCNpcInventory* inv, void* edx) {
-    if (player && inv == &player->inventory2) session.reset();
+    if (player && inv == &player->inventory2 && session && !session->dialog) session.reset();
     CloseHook(inv, edx);
 }
 
@@ -951,6 +1012,26 @@ auto PollHook = Union::CreateHook(
 
 void __cdecl PollInventory() {
     PollHook();
+    if (auto* dialog = ActiveTrade()) {
+        if (!session || session->dialog != dialog) {
+            session.reset();
+            auto next = std::make_unique<InventorySession>();
+            if (!next->trade.Open()) return;
+            auto& inv = player->inventory2;
+            if (inv.GetNumItemsInPackString() > 0) inv.UnpackAllItems();
+            if (ActiveTrade() != dialog) return;
+            next->dialog = dialog;
+            next->trade.Layout();
+            next->trade.Refresh(*dialog);
+            session = std::move(next);
+        }
+        if (session->PollTrade()) {
+            dialog->OnKeyEsc();
+            session.reset();
+        }
+        return;
+    }
+    if (session && session->dialog) session.reset();
     if (!player || !PersonalInventory(&player->inventory2)) {
         session.reset();
         return;

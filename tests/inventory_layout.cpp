@@ -1,8 +1,10 @@
 #include "../src/inventory_layout.hpp"
 #include "../src/inventory_history.hpp"
+#include "../src/inventory_trade_rules.hpp"
 
 #include <cassert>
 #include <climits>
+#include <limits>
 #include <sstream>
 
 using namespace InventoryLayout;
@@ -104,4 +106,17 @@ int main() {
     assert(QuantityFromText("100", 20) == 20);
     assert(QuantityFromText("0", 20) == 1);
     assert(QuantityFromText("9999999999", INT_MAX) == INT_MAX);
+
+    assert(InventoryTrade::SalePrice(100, .3f) == 30);
+    assert(InventoryTrade::SalePrice(10, .25f) == 2);
+    assert(InventoryTrade::SalePrice(14, .25f) == 4);
+    assert(InventoryTrade::SalePrice(1, .1f) == 1);
+    assert(InventoryTrade::SalePrice(0, .3f) == 0);
+    assert(InventoryTrade::SalePrice(100, std::numeric_limits<float>::infinity()) == 0);
+    assert(InventoryTrade::SalePrice(SHRT_MAX, 1.f) == SHRT_MAX);
+    assert(InventoryTrade::SalePrice(SHRT_MAX + 1, 1.f) == 0);
+    assert(InventoryTrade::Affordable(10, 9, 35) == 3);
+    assert(InventoryTrade::Affordable(10, 9, 8) == 0);
+    assert(InventoryTrade::Affordable(3, 9, INT_MAX) == 3);
+    assert(InventoryTrade::Affordable(10, 0, 0) == 10);
 }
