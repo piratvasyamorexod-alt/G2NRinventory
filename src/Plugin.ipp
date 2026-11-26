@@ -723,12 +723,6 @@ public:
         Text(left, close.y, Label(L"ИНВЕНТАРЬ", "INVENTORY"), close.x - left, Bronze);
         Text(close.x, close.y, "Esc", close.width, point && close.Hit(point->x, point->y) ? Bright : Bronze, true);
         DrawTabs(tabs, category, counts, point);
-        if (entries.empty()) {
-            auto message = Label(L"Здесь пока пусто", "No items in this category");
-            if (category == Category::Recent) message = Label(L"Здесь появятся полученные предметы", "Newly acquired items will appear here");
-            if (category == Category::Sale) message = Label(L"Shift + ЛКМ на вещи, чтобы отложить её", "Shift + click an item to set it aside");
-            Text(grid.area.x + 5, grid.area.y + 6, message, grid.area.width - 10, Bronze);
-        }
         const int first = firstRow * grid.columns, slots = grid.columns * grid.rows;
         for (int slot = 0; slot < slots; ++slot) {
             const int index = first + slot;

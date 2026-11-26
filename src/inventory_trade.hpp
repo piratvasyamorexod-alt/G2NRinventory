@@ -503,8 +503,6 @@ public:
                 if (entry && entry->entry.quantity > 1) ui.Text(cell.x + 3, cell.Bottom() - h,
                     std::to_string(entry->entry.quantity), cell.width - 7, Bright, true);
             }
-            if (side.items.empty()) ui.Text(side.grid.area.x + 6, side.grid.area.y + 5,
-                ui.Label(L"Здесь пока пусто", "No items in this category"), side.grid.area.width - 12, Bronze);
             ui.ScrollBar(side.scrollbar, side.grid.rows,
                          (static_cast<int>(side.items.size()) + side.grid.columns - 1) / side.grid.columns, side.firstRow);
         }
