@@ -1,3 +1,5 @@
+#pragma once
+
 InventoryHistory::History history;
 bool trackingPaused = false;
 bool usingItemState = false;
@@ -36,8 +38,7 @@ void WriteHistory(const std::filesystem::path& path) {
     if (!out) return;
     history.Save(out, [](int index) -> std::string {
         if (auto* symbol = parser->GetSymbol(index)) {
-            const auto name = symbol->GetName();
-            return name.ToChar();
+            return symbol->name.ToChar();
         }
         return {};
     });

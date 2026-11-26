@@ -28,7 +28,7 @@ constexpr unsigned long Equipped = 0xFFB7C98E;
 constexpr unsigned long Missing = 0xFFFFB797;
 constexpr int CategoryCount = static_cast<int>(Category::Count);
 
-#include "inventory_tracking.ipp"
+#include "inventory_tracking.hpp"
 
 Category Classify(const oCItem& item) {
     if (item.flags & ITM_FLAG_SHIELD) return Category::Armor;
