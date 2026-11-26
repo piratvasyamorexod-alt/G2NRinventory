@@ -20,6 +20,7 @@ using InventoryLayout::Box;
 using InventoryLayout::Category;
 using InventoryLayout::Entry;
 using InventoryLayout::Grid;
+using InventoryHistory::DocumentState;
 
 constexpr unsigned long Bronze = 0xFFDDB67D;
 constexpr unsigned long Paper = 0xFFF0DFBB;
@@ -27,6 +28,7 @@ constexpr unsigned long Bright = 0xFFFFEAC4;
 constexpr unsigned long Rule = 0xFF655740;
 constexpr unsigned long Equipped = 0xFFB7C98E;
 constexpr unsigned long Missing = 0xFFFFB797;
+constexpr unsigned long UnknownReading = 0xFFBCB7A9;
 constexpr int CategoryCount = static_cast<int>(Category::Count);
 
 #include "inventory_tracking.hpp"
@@ -223,9 +225,10 @@ class InventoryPanel {
         Fill({box.Right() - 1, box.y + 1, 1, box.height - 2}, color);
     }
 
-    void DrawMarker(zCView& sprite, int x, int y, int size) {
+    void DrawMarker(zCView& sprite, int x, int y, int size, unsigned long tint = 0xFFFFFFFF) {
         if (!sprite.backTex) return;
         Place(sprite, {x, y, size, size});
+        sprite.SetColor(Ink(tint));
         sprite.Blit();
     }
 
@@ -307,9 +310,9 @@ class InventoryPanel {
         if (item.flags & ITM_FLAG_ACTIVE) {
             wrap(Label(L"Экипировано", "Equipped"), Equipped);
         }
-        if (UnreadDocument(item)) {
-            wrap(Label(L"Не прочитано", "Unread"), Bronze);
-        }
+        const auto reading = DocumentReadingState(item);
+        if (reading == DocumentState::Unread) wrap(Label(L"Не прочитано", "Unread"), Bronze);
+        if (reading == DocumentState::Unknown) wrap(Label(L"Статус чтения неизвестен", "Reading status unknown"), UnknownReading);
         const bool weapon = Classify(item) == Category::Weapons;
         const int damage = weapon ? WeaponDamage(item) : 0;
         if (weapon) {
@@ -762,8 +765,9 @@ public:
             const auto cell = grid.Cell(slot);
             if (item->flags & ITM_FLAG_ACTIVE) DrawMarker(equippedMarker, cell.x + 2, cell.y + 2, marker);
             if (MissingRequirements(*item)) DrawMarker(lockedMarker, cell.Right() - marker - 2, cell.y + 2, marker);
-            else if (UnreadDocument(*item)) {
-                DrawMarker(unreadMarker, cell.Right() - marker - 2, cell.y + 2, marker);
+            else if (const auto reading = DocumentReadingState(*item); reading && reading != DocumentState::Read) {
+                const auto tint = reading == DocumentState::Unknown ? 0xFF99AFD0UL : 0xFFFFFFFFUL;
+                DrawMarker(unreadMarker, cell.Right() - marker - 2, cell.y + 2, marker, tint);
             }
         }
         zrenderer->SetAlphaBlendSource(previousAlpha);

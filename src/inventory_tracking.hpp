@@ -13,8 +13,9 @@ int DocumentInstance(oCItem* item) {
     return item && ReadableDocument(*item) ? item->GetInstance() : -1;
 }
 
-bool UnreadDocument(oCItem& item) {
-    return ReadableDocument(item) && history.ReadingState(item.GetInstance()) == InventoryHistory::DocumentState::Unread;
+std::optional<InventoryHistory::DocumentState> DocumentReadingState(oCItem& item) {
+    if (!ReadableDocument(item)) return std::nullopt;
+    return history.ReadingState(item.GetInstance());
 }
 
 void ObserveOwnedDocuments(oCNpcInventory& inv) {
