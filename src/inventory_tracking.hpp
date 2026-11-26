@@ -13,40 +13,6 @@ int DocumentInstance(oCItem* item) {
     return item && ReadableDocument(*item) ? item->GetInstance() : -1;
 }
 
-std::optional<InventoryHistory::DocumentState> DocumentReadingState(oCItem& item) {
-    if (!ReadableDocument(item)) return std::nullopt;
-    return history.ReadingState(item.GetInstance());
-}
-
-std::optional<int> DocumentScriptInt(const char* name) {
-    auto* symbol = parser ? parser->GetSymbol(zSTRING(name)) : nullptr;
-    if (!symbol || symbol->type != zPAR_TYPE_INT || !symbol->ele) return std::nullopt;
-    int value = 0;
-    symbol->GetValue(value, 0);
-    return value;
-}
-
-void ObserveOwnedDocuments(oCNpcInventory& inv) {
-    const auto ironbeardProgress = DocumentScriptInt("TAMORAEINSIEDLERBRIEFGELESEN");
-    for (auto* node = inv.inventory.GetNextInList(); node; node = node->GetNextInList()) {
-        auto* item = node->GetData();
-        const int instance = DocumentInstance(item);
-        if (instance < 0) continue;
-        history.ObserveDocument(instance);
-        if (!ironbeardProgress || history.ReadingState(instance) == InventoryHistory::DocumentState::Read) continue;
-
-        const auto* itemSymbol = parser->GetSymbol(instance);
-        const auto* readerSymbol = parser->GetSymbol(item->GetStateEffectFunc(0));
-        if (!itemSymbol || itemSymbol->name.IsEmpty() || !readerSymbol || readerSymbol->name.IsEmpty()) continue;
-        auto itemName = itemSymbol->name;
-        auto readerName = readerSymbol->name;
-        if (OdysseeDocumentReads::HasReadEvidence(itemName.Upper().ToChar(), readerName.Upper().ToChar(), *ironbeardProgress,
-                                                [](const char* flag) { return DocumentScriptInt(flag) == 1; })) {
-            history.MarkRead(instance);
-        }
-    }
-}
-
 std::filesystem::path HistoryPath(oCSavegameManager* manager, int slot) {
     if (!zoptions || !manager || slot < 0) return {};
     const auto& directory = zoptions->GetDirString(DIR_SAVEGAMES);
@@ -101,7 +67,6 @@ void __fastcall LoadHistory(oCGame* game, void* edx, int slot, int globals) {
     trackingPaused = previous;
     if (globals && slot >= 0) {
         ReadHistory(HistoryPath(game->savegameManager, slot));
-        if (player) ObserveOwnedDocuments(player->inventory2);
     }
 }
 
@@ -132,26 +97,18 @@ oCItem* __fastcall TrackInsert(oCNpcInventory* inv, void* edx, oCItem* item) {
     if (trackingPaused || !player || inv != &player->inventory2 || !item || item->amount <= 0
         || item == player->interactItem) return InsertHook(inv, edx, item);
     const int instance = item->GetInstance();
-    const bool document = ReadableDocument(*item);
-    const bool reserved = history.ForSale(instance) > 0;
-    bool alreadyOwned = false;
+    const bool reconcileSale = history.ForSale(instance) > 0 && inv->GetNumItemsInPackString() == 0;
     int owned = 0;
     for (auto* node = inv->inventory.GetNextInList(); node; node = node->GetNextInList()) {
         auto* existing = node->GetData();
         if (existing == item) return InsertHook(inv, edx, item);
-        if (!existing || (!document && !reserved) || existing->GetInstance() != instance || existing->amount <= 0) continue;
-        alreadyOwned = true;
-        if (reserved && !(existing->flags & ITM_FLAG_ACTIVE)) {
+        if (reconcileSale && existing && !(existing->flags & ITM_FLAG_ACTIVE) && existing->GetInstance() == instance) {
             owned += std::clamp(existing->amount, 0, INT_MAX - owned);
         }
     }
-    const bool unpacked = (document || reserved) && inv->GetNumItemsInPackString() == 0;
-    if (reserved && unpacked) history.CapForSale(instance, owned);
+    if (reconcileSale) history.CapForSale(instance, owned);
     auto* result = InsertHook(inv, edx, item);
-    if (result) {
-        history.Acquire(instance);
-        if (document) history.ObserveDocument(instance, unpacked && !alreadyOwned);
-    }
+    if (result) history.Acquire(instance);
     return result;
 }
 

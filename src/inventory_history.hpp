@@ -4,17 +4,16 @@
 #include <istream>
 #include <map>
 #include <ostream>
+#include <set>
 #include <sstream>
 #include <string>
 #include <vector>
 
 namespace InventoryHistory {
 
-enum class DocumentState { Unknown, Unread, Read };
-
 class History {
     std::vector<int> recent;
-    std::map<int, DocumentState> documents;
+    std::set<int> readDocuments;
     std::map<int, int> sale;
 
 public:
@@ -33,16 +32,8 @@ public:
         return entry == recent.end() ? -1 : static_cast<int>(entry - recent.begin());
     }
 
-    void ObserveDocument(int instance, bool newlyAcquired = false) {
-        if (instance >= 0) documents.try_emplace(instance, newlyAcquired ? DocumentState::Unread : DocumentState::Unknown);
-    }
-
-    void MarkRead(int instance) { if (instance >= 0) documents[instance] = DocumentState::Read; }
-
-    DocumentState ReadingState(int instance) const {
-        const auto entry = documents.find(instance);
-        return entry == documents.end() ? DocumentState::Unknown : entry->second;
-    }
+    void MarkRead(int instance) { if (instance >= 0) readDocuments.insert(instance); }
+    bool WasRead(int instance) const { return readDocuments.find(instance) != readDocuments.end(); }
 
     const auto& Recent() const { return recent; }
     bool HasSale() const { return !sale.empty(); }
@@ -77,7 +68,7 @@ public:
     template<class Resolve>
     void Load(std::istream& input, Resolve resolve) {
         recent.clear();
-        documents.clear();
+        readDocuments.clear();
         sale.clear();
         std::string line;
         if (!std::getline(input, line) || (line != "G2NRinventory 1" && line != "G2NRinventory 2")) return;
@@ -88,7 +79,6 @@ public:
             if (!(record >> kind >> name)) continue;
             if (kind == 'R') Acquire(resolve(name));
             if (kind == 'D') MarkRead(resolve(name));
-            if (kind == 'U' || kind == 'O') ObserveDocument(resolve(name), kind == 'U');
             int quantity;
             if (kind == 'S' && record >> quantity && quantity > 0) SetForSale(resolve(name), quantity);
         }
@@ -102,9 +92,7 @@ public:
             if (!name.empty()) output << kind << ' ' << name << '\n';
         };
         for (auto it = recent.rbegin(); it != recent.rend(); ++it) write('R', *it);
-        for (const auto& [instance, state] : documents) {
-            write(state == DocumentState::Read ? 'D' : state == DocumentState::Unread ? 'U' : 'O', instance);
-        }
+        for (int instance : readDocuments) write('D', instance);
         for (const auto& [instance, quantity] : sale) {
             const auto name = resolve(instance);
             if (!name.empty()) output << "S " << name << ' ' << quantity << '\n';
