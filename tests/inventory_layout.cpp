@@ -6,6 +6,7 @@
 #include <sstream>
 
 using namespace InventoryLayout;
+using InventoryHistory::DocumentState;
 
 int main() {
     std::vector<Entry> entries{
@@ -27,9 +28,18 @@ int main() {
                               {1, Category::Supplies, 0, history.Rank(20)}};
     Sort(recent, Category::Recent);
     assert(recent[0].nativeIndex == 1);
+    assert(history.ReadingState(20) == DocumentState::Unknown);
+    history.ObserveDocument(20);
+    history.ObserveDocument(20, true);
+    assert(history.ReadingState(20) == DocumentState::Unknown);
     history.MarkRead(20);
     history.Acquire(20);
-    assert(history.WasRead(20) && !history.WasRead(21));
+    history.ObserveDocument(20, true);
+    history.ObserveDocument(21, true);
+    history.ObserveDocument(21);
+    history.ObserveDocument(22);
+    assert(history.ReadingState(20) == DocumentState::Read);
+    assert(history.ReadingState(21) == DocumentState::Unread);
     history.SetForSale(20, 15);
     int reserved = history.ForSale(20);
     assert(AllocateSale(4, reserved) == 4);
@@ -46,7 +56,12 @@ int main() {
         return name.compare(0, 8, "IT_TEST_") == 0 ? std::stoi(name.substr(8)) + 100 : -1;
     });
     assert((loaded.Recent() == std::vector<int>{120, 121}));
-    assert(loaded.WasRead(120) && !loaded.WasRead(121) && !loaded.WasRead(20));
+    assert(loaded.ReadingState(120) == DocumentState::Read);
+    assert(loaded.ReadingState(121) == DocumentState::Unread);
+    loaded.ObserveDocument(122, true);
+    assert(loaded.ReadingState(122) == DocumentState::Unknown);
+    loaded.MarkRead(121);
+    assert(loaded.ReadingState(121) == DocumentState::Read);
     assert(loaded.ForSale(120) == 15 && loaded.ForSale(121) == 1);
     loaded.ReconcileSale({{120, 7}});
     assert(loaded.ForSale(120) == 7 && loaded.ForSale(121) == 0);
@@ -54,10 +69,13 @@ int main() {
     assert(!loaded.HasSale());
     std::istringstream previousVersion("G2NRinventory 1\nR HERE\nD HERE\n");
     loaded.Load(previousVersion, [](const std::string&) { return 5; });
-    assert(loaded.Rank(5) == 0 && loaded.WasRead(5) && !loaded.HasSale());
+    assert(loaded.Rank(5) == 0 && loaded.ReadingState(5) == DocumentState::Read && !loaded.HasSale());
+    std::istringstream legacyRecent("G2NRinventory 2\nR LEGACY_DOCUMENT\nS LEGACY_DOCUMENT 1\n");
+    loaded.Load(legacyRecent, [](const std::string&) { return 6; });
+    assert(loaded.Rank(6) == 0 && loaded.ReadingState(6) == DocumentState::Unknown && loaded.ForSale(6) == 1);
     for (int index = 100; index < 200; ++index) history.Acquire(index);
     assert(history.Recent().size() == InventoryHistory::History::MaximumRecent);
-    assert(history.Rank(20) == -1 && history.Rank(199) == 0 && history.WasRead(20));
+    assert(history.Rank(20) == -1 && history.Rank(199) == 0 && history.ReadingState(20) == DocumentState::Read);
 
     for (const auto available : {Box{10, 15, 250, 170}, Box{10, 15, 480, 270}, Box{10, 15, 900, 650}}) {
         const auto grid = MakeGrid(available, 95, 4);

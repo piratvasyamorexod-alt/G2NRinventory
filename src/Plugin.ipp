@@ -307,7 +307,7 @@ class InventoryPanel {
         if (item.flags & ITM_FLAG_ACTIVE) {
             wrap(Label(L"Экипировано", "Equipped"), Equipped);
         }
-        if (ReadableDocument(item) && !history.WasRead(item.GetInstance())) {
+        if (UnreadDocument(item)) {
             wrap(Label(L"Не прочитано", "Unread"), Bronze);
         }
         const bool weapon = Classify(item) == Category::Weapons;
@@ -762,7 +762,7 @@ public:
             const auto cell = grid.Cell(slot);
             if (item->flags & ITM_FLAG_ACTIVE) DrawMarker(equippedMarker, cell.x + 2, cell.y + 2, marker);
             if (MissingRequirements(*item)) DrawMarker(lockedMarker, cell.Right() - marker - 2, cell.y + 2, marker);
-            else if (ReadableDocument(*item) && !history.WasRead(item->GetInstance())) {
+            else if (UnreadDocument(*item)) {
                 DrawMarker(unreadMarker, cell.Right() - marker - 2, cell.y + 2, marker);
             }
         }
@@ -960,6 +960,8 @@ void __cdecl PollInventory() {
         if (!next->panel.Ready()) return;
         // The engine owns these stacks. Materialize them once so every category can be listed.
         if (inv.GetNumItemsInPackString() > 0) inv.UnpackAllItems();
+        ObserveOwnedDocuments(inv);
+        ImportOdysseeDocumentProgress();
         next->panel.Layout();
         next->panel.Refresh(inv);
         session = std::move(next);

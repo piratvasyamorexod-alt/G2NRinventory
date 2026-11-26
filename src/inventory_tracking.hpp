@@ -13,6 +13,27 @@ int DocumentInstance(oCItem* item) {
     return item && ReadableDocument(*item) ? item->GetInstance() : -1;
 }
 
+bool UnreadDocument(oCItem& item) {
+    return ReadableDocument(item) && history.ReadingState(item.GetInstance()) == InventoryHistory::DocumentState::Unread;
+}
+
+void ObserveOwnedDocuments(oCNpcInventory& inv) {
+    for (auto* node = inv.inventory.GetNextInList(); node; node = node->GetNextInList()) {
+        history.ObserveDocument(DocumentInstance(node->GetData()));
+    }
+}
+
+void ImportOdysseeDocumentProgress() {
+    auto* stage = parser ? parser->GetSymbol(zSTRING("TAMORAEINSIEDLERBRIEFGELESEN")) : nullptr;
+    if (!stage || stage->type != zPAR_TYPE_INT || !stage->ele) return;
+    int progress = 0;
+    stage->GetValue(progress, 0);
+    // Each of these three documents advances this counter once, after Doc_Show.
+    constexpr std::array names{"ITWR_EISENBARTSDOKUMENT", "ITWR_EISENBARTSDOKUMENT2", "ITWR_EISENBARTSDOKUMENT3"};
+    if (progress < 1 || progress > static_cast<int>(names.size())) return;
+    for (int i = 0; i < progress; ++i) history.MarkRead(parser->GetIndex(zSTRING(names[i])));
+}
+
 std::filesystem::path HistoryPath(oCSavegameManager* manager, int slot) {
     if (!zoptions || !manager || slot < 0) return {};
     const auto& directory = zoptions->GetDirString(DIR_SAVEGAMES);
@@ -65,7 +86,11 @@ void __fastcall LoadHistory(oCGame* game, void* edx, int slot, int globals) {
     const bool previous = std::exchange(trackingPaused, true);
     LoadHistoryHook(game, edx, slot, globals);
     trackingPaused = previous;
-    if (globals && slot >= 0) ReadHistory(HistoryPath(game->savegameManager, slot));
+    if (globals && slot >= 0) {
+        ReadHistory(HistoryPath(game->savegameManager, slot));
+        ImportOdysseeDocumentProgress();
+        if (player) ObserveOwnedDocuments(player->inventory2);
+    }
 }
 
 void __fastcall NewGame(oCGame*, void*, int, const zSTRING&);
@@ -94,22 +119,27 @@ auto InsertHook = Union::CreateHook(
 oCItem* __fastcall TrackInsert(oCNpcInventory* inv, void* edx, oCItem* item) {
     if (trackingPaused || !player || inv != &player->inventory2 || !item || item->amount <= 0
         || item == player->interactItem) return InsertHook(inv, edx, item);
-    for (auto* node = inv->inventory.GetNextInList(); node; node = node->GetNextInList()) {
-        if (node->GetData() == item) return InsertHook(inv, edx, item);
-    }
     const int instance = item->GetInstance();
-    if (history.ForSale(instance) > 0 && inv->GetNumItemsInPackString() == 0) {
-        int owned = 0;
-        for (auto* node = inv->inventory.GetNextInList(); node; node = node->GetNextInList()) {
-            auto* existing = node->GetData();
-            if (existing && existing->GetInstance() == instance && !(existing->flags & ITM_FLAG_ACTIVE)) {
-                owned += std::clamp(existing->amount, 0, INT_MAX - owned);
-            }
+    const bool document = ReadableDocument(*item);
+    const bool reserved = history.ForSale(instance) > 0;
+    bool alreadyOwned = false;
+    int owned = 0;
+    for (auto* node = inv->inventory.GetNextInList(); node; node = node->GetNextInList()) {
+        auto* existing = node->GetData();
+        if (existing == item) return InsertHook(inv, edx, item);
+        if (!existing || (!document && !reserved) || existing->GetInstance() != instance || existing->amount <= 0) continue;
+        alreadyOwned = true;
+        if (reserved && !(existing->flags & ITM_FLAG_ACTIVE)) {
+            owned += std::clamp(existing->amount, 0, INT_MAX - owned);
         }
-        history.CapForSale(instance, owned);
     }
+    const bool unpacked = (document || reserved) && inv->GetNumItemsInPackString() == 0;
+    if (reserved && unpacked) history.CapForSale(instance, owned);
     auto* result = InsertHook(inv, edx, item);
-    if (result) history.Acquire(instance);
+    if (result) {
+        history.Acquire(instance);
+        if (document) history.ObserveDocument(instance, unpacked && !alreadyOwned);
+    }
     return result;
 }
 
