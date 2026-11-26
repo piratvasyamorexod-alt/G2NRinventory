@@ -20,7 +20,8 @@ class TradePanel {
     struct Lot { oCItem* item; int instance, amount, price; };
     struct Side {
         Grid grid;
-        Box tabs, scrollbar;
+        InventoryLayout::FittedTabs tabs;
+        Box scrollbar;
         std::vector<Slot> items;
         std::array<int, CategoryCount> counts{};
         Category category = Category::All;
@@ -40,6 +41,7 @@ class TradePanel {
 
     InventoryPanel& ui;
     std::array<Side, 2> sides;
+    std::array<std::string, CategoryCount> tabNames;
     Box close, bulkButton, footer, card, confirm, cancel, number, slider;
     int currency = -1;
     std::int64_t wallet = 0;
@@ -232,9 +234,19 @@ public:
         const int gap = std::clamp(screen->psizey / 360, 2, 5);
         const int pad = std::clamp(screen->psizey / 80, 8, 20);
         const int target = std::clamp(screen->psizey / 15, 40, 108);
-        const int width = (std::min)(screen->psizex * 94 / 100, 13 * (target + gap) + 5 * pad);
+        InventoryLayout::CategoryWidths labelWidths{};
+        for (int i = 0; i < CategoryCount; ++i) {
+            const auto& label = CategoryLabels[i];
+            tabNames[i] = ui.Label(label.ru, label.en);
+            labelWidths[i] = ui.Width(tabNames[i]) + (std::max)(8, h / 2);
+        }
+        const int preferredPane = (std::max)(InventoryLayout::TwoRowTabWidth(labelWidths, true),
+                                             13 * (target + gap) / 2);
+        const int width = (std::min)(screen->psizex * 94 / 100, 2 * preferredPane + 5 * pad);
         const int pane = (width - 5 * pad) / 2;
-        const int tabsHeight = 2 * (h + 5);
+        sides[0].tabs = InventoryLayout::FitCategoryTabs(0, pane, h + 5, labelWidths, false);
+        sides[1].tabs = InventoryLayout::FitCategoryTabs(0, pane, h + 5, labelWidths, true);
+        const int tabsHeight = (std::max)(sides[0].tabs.height, sides[1].tabs.height);
         const int chrome = 4 * h + 4 * pad + tabsHeight + gap;
         auto grid = InventoryLayout::MakeGrid({0, 0, pane, screen->psizey * 78 / 100 - chrome}, target, gap);
         const int height = grid.area.height + chrome;
@@ -246,7 +258,11 @@ public:
             grid.area.x = x + i * (pane + 3 * pad);
             grid.area.y = tabsTop + tabsHeight + gap;
             sides[i].grid = grid;
-            sides[i].tabs = {grid.area.x, tabsTop, pane, tabsHeight};
+            for (auto& cell : sides[i].tabs.cells) {
+                cell.x += grid.area.x;
+                cell.y += tabsTop;
+            }
+            sides[i].firstRow = std::clamp(sides[i].firstRow, 0, grid.LastRow(static_cast<int>(sides[i].items.size())));
             sides[i].scrollbar = {grid.area.Right() + 1, grid.area.y, pad, grid.area.height};
         }
         close = {ui.bounds.Right() - pad - ui.Width("Esc") - 9, ui.bounds.y + pad, ui.Width("Esc") + 9, h};
@@ -373,7 +389,7 @@ public:
         if (close.Hit(point.x, point.y)) return true;
         for (int i = 0; i < 2; ++i) {
             auto& side = sides[i];
-            if (const auto category = InventoryLayout::CategoryAt(side.tabs, point.x, point.y, i == 1)) {
+            if (const auto category = side.tabs.Hit(point.x, point.y)) {
                 if (side.category != *category) {
                     side.category = *category;
                     side.firstRow = 0;
@@ -454,8 +470,8 @@ public:
     }
 
     void Draw(oCViewDialogTrade& dialog, std::optional<POINT> point) {
-        Layout();
         Refresh(dialog);
+        Layout();
         ui.textView.ClrPrintwin();
         const auto hover = point && !deal ? Hit(*point) : std::nullopt;
         const auto alpha = zrenderer->GetAlphaBlendSource();
@@ -470,7 +486,11 @@ public:
             const auto& side = sides[i];
             const auto title = i == 0 ? std::string(dialog.NpcLeft->name[0].ToChar()) : ui.Label(L"Вещи героя", "Your items");
             ui.Text(side.grid.area.x, top + h + 5, title, side.grid.area.width, Bronze);
-            ui.DrawTabs(side.tabs, side.category, side.counts, deal ? std::nullopt : point, i == 1);
+            ui.Fill({side.grid.area.x, side.grid.area.y - 2, side.grid.area.width, 1}, Rule);
+            for (int j = 0; j < CategoryCount; ++j) {
+                ui.DrawTab(side.tabs.cells[j], tabNames[j], static_cast<Category>(j) == side.category,
+                           side.counts[j] != 0, deal ? std::nullopt : point);
+            }
             const int slots = side.grid.columns * side.grid.rows, first = side.firstRow * side.grid.columns;
             for (int slot = 0; slot < slots; ++slot) {
                 const auto cell = side.grid.Cell(slot);

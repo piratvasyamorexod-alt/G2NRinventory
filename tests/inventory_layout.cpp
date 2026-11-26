@@ -90,19 +90,39 @@ int main() {
     const auto compact = MakeGrid({0, 0, 557, 680}, 77, 3);
     assert(compact.columns == 7 && compact.rows == 8 && compact.size == 77);
 
-    const Box heroTabs{510, 110, 483, 50}, merchantTabs{12, 110, 483, 50};
+    const Box heroTabs{510, 110, 483, 50};
     for (int i = 0; i < static_cast<int>(Category::Count); ++i) {
         const auto category = static_cast<Category>(i);
         const auto tab = CategoryTab(heroTabs, category);
         assert(CategoryAt(heroTabs, tab.x, tab.y) == category);
         assert(CategoryAt(heroTabs, tab.Right() - 1, tab.Bottom() - 1) == category);
-        if (category == Category::Recent || category == Category::Sale) continue;
-        const auto stockTab = CategoryTab(merchantTabs, category, false);
-        assert(CategoryAt(merchantTabs, stockTab.x, stockTab.y, false) == category);
-        assert(CategoryAt(merchantTabs, stockTab.Right() - 1, stockTab.Bottom() - 1, false) == category);
     }
     assert(!CategoryAt(heroTabs, heroTabs.Right(), heroTabs.y));
-    assert(!CategoryAt(merchantTabs, merchantTabs.x, merchantTabs.Bottom(), false));
+
+    const CategoryWidths largeFont{122, 57, 107, 87, 111, 88, 115, 104, 100, 142};
+    const int paneWidth = TwoRowTabWidth(largeFont, true);
+    const int rowHeight = 32;
+    for (const bool hero : {true, false}) {
+        for (const int width : {paneWidth, 487, 270}) {
+            const auto layout = FitCategoryTabs(12, width, rowHeight, largeFont, hero);
+            assert(layout.height >= 2 * rowHeight);
+            if (width == paneWidth) assert(layout.height == 2 * rowHeight);
+            if (hero && width == 270) assert(layout.height > 2 * rowHeight);
+            for (int i = 0; i < static_cast<int>(largeFont.size()); ++i) {
+                const auto category = static_cast<Category>(i);
+                const auto cell = layout.cells[i];
+                if (!hero && (category == Category::Recent || category == Category::Sale)) {
+                    assert(cell.width == 0);
+                    continue;
+                }
+                assert(cell.width >= largeFont[i] && cell.Right() <= width + 12);
+                assert(layout.Hit(cell.x, cell.y) == category);
+                assert(layout.Hit(cell.Right() - 1, cell.Bottom() - 1) == category);
+            }
+            assert(!layout.Hit(12 + width, 0));
+            assert(!layout.Hit(12, layout.height));
+        }
+    }
 
     const auto nearPointer = PlaceTooltip(viewport, 650, 400, 330, 160, 16);
     assert(nearPointer.x == 666 && nearPointer.y == 416);

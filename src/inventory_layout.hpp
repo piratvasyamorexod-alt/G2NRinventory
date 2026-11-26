@@ -10,6 +10,7 @@
 namespace InventoryLayout {
 
 enum class Category { Recent, All, Weapons, Armor, Ammo, Magic, Supplies, Documents, Other, Sale, Count };
+using CategoryWidths = std::array<int, static_cast<int>(Category::Count)>;
 
 struct Box {
     int x = 0, y = 0, width = 0, height = 0;
@@ -18,29 +19,70 @@ struct Box {
     bool Hit(int px, int py) const { return x <= px && px < Right() && y <= py && py < Bottom(); }
 };
 
-inline Box CategoryTab(Box tabs, Category category, bool hero = true) {
-    const int index = static_cast<int>(category) - (hero ? 0 : 1);
-    const int columns = hero ? 5 : 4;
+inline Box CategoryTab(Box tabs, Category category) {
+    const int index = static_cast<int>(category);
+    constexpr int columns = 5;
     const bool lower = index >= columns;
     const int column = index % columns;
     const int height = tabs.height / 2;
     constexpr std::array<int, 6> top{0, 26, 44, 62, 80, 100}, bottom{0, 18, 37, 55, 74, 100};
     const auto& stops = lower ? bottom : top;
-    const int start = hero ? stops[column] : column * 25;
-    const int end = hero ? stops[column + 1] : (column + 1) * 25;
-    const int left = tabs.x + start * tabs.width / 100;
-    return {left, tabs.y + (lower ? height : 0), tabs.x + end * tabs.width / 100 - left, height};
+    const int left = tabs.x + stops[column] * tabs.width / 100;
+    return {left, tabs.y + (lower ? height : 0), tabs.x + stops[column + 1] * tabs.width / 100 - left, height};
 }
 
-inline std::optional<Category> CategoryAt(Box tabs, int x, int y, bool hero = true) {
+inline std::optional<Category> CategoryAt(Box tabs, int x, int y) {
     if (!tabs.Hit(x, y)) return std::nullopt;
-    const int first = static_cast<int>(hero ? Category::Recent : Category::All);
-    const int end = static_cast<int>(hero ? Category::Count : Category::Sale);
-    for (int i = first; i < end; ++i) {
+    for (int i = 0; i < static_cast<int>(Category::Count); ++i) {
         const auto category = static_cast<Category>(i);
-        if (CategoryTab(tabs, category, hero).Hit(x, y)) return category;
+        if (CategoryTab(tabs, category).Hit(x, y)) return category;
     }
     return std::nullopt;
+}
+
+struct FittedTabs {
+    std::array<Box, static_cast<int>(Category::Count)> cells{};
+    int height = 0;
+
+    std::optional<Category> Hit(int x, int y) const {
+        for (int i = 0; i < static_cast<int>(cells.size()); ++i) {
+            if (cells[i].Hit(x, y)) return static_cast<Category>(i);
+        }
+        return std::nullopt;
+    }
+};
+
+inline int TwoRowTabWidth(const CategoryWidths& widths, bool hero) {
+    const int first = static_cast<int>(hero ? Category::Recent : Category::All);
+    const int split = static_cast<int>(Category::Magic);
+    const int end = static_cast<int>(hero ? Category::Count : Category::Sale);
+    int upper = 0, lower = 0;
+    for (int i = first; i < split; ++i) upper += widths[i];
+    for (int i = split; i < end; ++i) lower += widths[i];
+    return (std::max)(upper, lower);
+}
+
+inline FittedTabs FitCategoryTabs(int x, int width, int rowHeight, const CategoryWidths& widths, bool hero) {
+    const int first = static_cast<int>(hero ? Category::Recent : Category::All);
+    const int end = static_cast<int>(hero ? Category::Count : Category::Sale);
+    const int split = width >= TwoRowTabWidth(widths, hero) ? static_cast<int>(Category::Magic) : end;
+    FittedTabs tabs;
+    for (int start = first; start < end;) {
+        const int rowEnd = start < split ? split : end;
+        int next = start + 1, used = (std::min)(widths[start], width);
+        while (next < rowEnd && widths[next] <= width - used) used += widths[next++];
+        int left = x, spare = width - used;
+        for (int i = start; i < next; ++i) {
+            const int padding = spare / (next - i);
+            const int cellWidth = (std::min)(widths[i], width) + padding;
+            tabs.cells[i] = {left, tabs.height, cellWidth, rowHeight};
+            left += cellWidth;
+            spare -= padding;
+        }
+        tabs.height += rowHeight;
+        start = next;
+    }
+    return tabs;
 }
 
 struct Entry {

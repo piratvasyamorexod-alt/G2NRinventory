@@ -246,21 +246,20 @@ class InventoryPanel {
         sprite.Blit();
     }
 
-    void DrawTabs(Box area, Category current, const std::array<int, CategoryCount>& available,
-                  std::optional<POINT> point, bool hero = true) {
+    void DrawTab(Box cell, const std::string& name, bool active, bool available, std::optional<POINT> point) {
+        if (cell.width <= 0) return;
+        const int x = cell.x + (std::max)(2, (cell.width - Width(name)) / 2);
+        Text(x, cell.y, name, cell.Right() - x - 1,
+             active || (point && cell.Hit(point->x, point->y)) ? Bright : available ? Bronze : Paper);
+        if (active) Fill({cell.x + 5, cell.Bottom() - 2, cell.width - 10, 2}, Bronze);
+    }
+
+    void DrawTabs(Box area, Category current, const std::array<int, CategoryCount>& available, std::optional<POINT> point) {
         Fill({area.x, area.Bottom() - 1, area.width, 1}, Rule);
-        const int first = static_cast<int>(hero ? Category::Recent : Category::All);
-        const int end = static_cast<int>(hero ? Category::Count : Category::Sale);
-        for (int i = first; i < end; ++i) {
+        for (int i = 0; i < CategoryCount; ++i) {
             const auto tab = static_cast<Category>(i);
-            const auto cell = InventoryLayout::CategoryTab(area, tab, hero);
             const auto& label = CategoryLabels[i];
-            const auto name = Label(label.ru, label.en);
-            const bool active = tab == current;
-            const int x = cell.x + (std::max)(2, (cell.width - Width(name)) / 2);
-            Text(x, cell.y, name, cell.Right() - x - 1,
-                 active || (point && cell.Hit(point->x, point->y)) ? Bright : available[i] ? Bronze : Paper);
-            if (active) Fill({cell.x + 5, cell.Bottom() - 2, cell.width - 10, 2}, Bronze);
+            DrawTab(InventoryLayout::CategoryTab(area, tab), Label(label.ru, label.en), tab == current, available[i] != 0, point);
         }
     }
 
@@ -397,7 +396,6 @@ class InventoryPanel {
                 || (hasRequirement(NPC_ATR_DEXTERITY, value) && label == Label(L"Необходимо ловкости", "Dexterity required")))) continue;
             wrap(value != 0 ? text + "  " + std::to_string(value) : text);
         }
-        if (amount > 1) add(L"В стопке", "Stack", amount);
         if (showValue && item.value > 0) {
             if (amount > 1) add(L"Цена за штуку", "Value per item", item.value);
             else add(L"Цена", "Value", item.value);
@@ -875,8 +873,8 @@ public:
         const auto wheel = ScreenPoint(input.wheelPosition);
         if (click || (wheel && input.wheel)) {
             const bool wasConfirming = trade.HasConfirmation();
-            trade.Layout();
             trade.Refresh(*dialog);
+            trade.Layout();
             if (wasConfirming && !trade.HasConfirmation()) return false;
             if (click && trade.Click(*click, *dialog)) return true;
             if (wheel && input.wheel) trade.Scroll(*wheel, input.wheel);
@@ -1017,8 +1015,8 @@ void __cdecl PollInventory() {
             if (inv.GetNumItemsInPackString() > 0) inv.UnpackAllItems();
             if (ActiveTrade() != dialog) return;
             next->dialog = dialog;
-            next->trade.Layout();
             next->trade.Refresh(*dialog);
+            next->trade.Layout();
             session = std::move(next);
         }
         if (session->PollTrade()) {
