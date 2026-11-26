@@ -50,11 +50,17 @@ struct Grid {
 };
 
 inline Grid MakeGrid(Box available, int target, int gap) {
-    const int columns = std::clamp((available.width + gap) / (target + gap), 4, 6);
+    const int columns = std::clamp((available.width + gap) / (target + gap), 4, 7);
     const int size = (available.width - gap * (columns - 1)) / columns;
     const int rows = (std::max)(1, (available.height + gap) / (size + gap));
     return {{available.x, available.y, columns * (size + gap) - gap, rows * (size + gap) - gap},
             columns, rows, gap, size};
+}
+
+inline Box PlaceTooltip(Box viewport, int x, int y, int width, int height, int gap) {
+    const int maxX = viewport.Right() - width, maxY = viewport.Bottom() - height;
+    return {std::clamp(x + gap <= maxX ? x + gap : x - gap - width, viewport.x, maxX),
+            std::clamp(y + gap <= maxY ? y + gap : y - gap - height, viewport.y, maxY), width, height};
 }
 
 }  // namespace InventoryLayout

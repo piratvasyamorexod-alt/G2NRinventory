@@ -4,6 +4,7 @@
 #include "mouse_win32.hpp"
 
 #include <array>
+#include <iterator>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -92,24 +93,25 @@ enum class Command { None, Use, Close };
 class InventoryPanel {
     zCView panel{0, 0, 8192, 8192};
     zCView textView{0, 0, 8192, 8192};
+    zCView tooltipText{0, 0, 8192, 8192};
     zCView solid{0, 0, 8, 8};
     zCView preview{0, 0, 8, 8};
     zCView cursor{0, 0, 8, 8};
-    Box bounds, details, close, tabs, listBar, detailBar;
+    Box bounds, close, tabs, listBar;
     Grid grid;
     std::vector<Entry> entries;
     std::vector<oCItem*> nativeItems;
     std::array<int, CategoryCount> counts{};
     Category category = Category::All;
-    int inset = 0, lineHeight = 0, firstRow = 0, detailTop = 0, detailCount = 0, detailRows = 0;
+    int inset = 0, lineHeight = 0, firstRow = 0;
     int selected = -1;
     oCItem* selectedItem = nullptr;
     int selectedInstance = -1;
     oCItem* lastClicked = nullptr;
     int lastInstance = -1;
     ULONGLONG lastClickAt = 0;
-    oCItem* previousDetail = nullptr;
-    int previousDetailInstance = -1;
+    oCItem* tooltipItem = nullptr;
+    int tooltipInstance = -1, tooltipTop = 0, tooltipMaxTop = 0;
     bool useSelection = false, cyrillic = true;
 
     std::string Label(const wchar_t* ru, const char* en) const {
@@ -129,7 +131,7 @@ class InventoryPanel {
 
     int Width(const std::string& text) { return panel.GetFont()->GetFontX(zSTRING(text.c_str())); }
 
-    void Text(int x, int y, std::string text, int width, unsigned long ink = Paper, bool right = false) {
+    void DrawText(zCView& view, int x, int y, std::string text, int width, unsigned long ink, bool right = false) {
         if (text.empty() || width <= 0) return;
         if (cyrillic) Normalize(text);
         if (Width(text) > width) {
@@ -142,8 +144,12 @@ class InventoryPanel {
         const zSTRING value(text.c_str());
         auto color = Ink(ink);
         auto shadow = Ink(0xFF0A0907);
-        textView.CreateText(textView.anx(x - bounds.x), textView.any(y - bounds.y), value, 0, color, FALSE, TRUE);
-        textView.CreateText(textView.anx(x - bounds.x + 1), textView.any(y - bounds.y + 1), value, 0, shadow, FALSE, TRUE);
+        view.CreateText(view.anx(x - view.pposx), view.any(y - view.pposy), value, 0, color, FALSE, TRUE);
+        view.CreateText(view.anx(x - view.pposx + 1), view.any(y - view.pposy + 1), value, 0, shadow, FALSE, TRUE);
+    }
+
+    void Text(int x, int y, std::string text, int width, unsigned long ink = Paper, bool right = false) {
+        DrawText(textView, x, y, std::move(text), width, ink, right);
     }
 
     void Fill(Box box, unsigned long color) {
@@ -194,14 +200,14 @@ class InventoryPanel {
 
     struct Line { std::string text; unsigned long ink; };
 
-    void Wrap(std::vector<Line>& lines, std::string_view source, unsigned long ink) {
+    void Wrap(std::vector<Line>& lines, std::string_view source, int width, unsigned long ink) {
         std::string line;
         for (std::size_t start = 0; start < source.size();) {
             const auto end = source.find_first_of(" \t\r\n", start);
             const auto word = source.substr(start, end == std::string_view::npos ? source.size() - start : end - start);
             if (!word.empty()) {
                 const auto next = line.empty() ? std::string(word) : line + " " + std::string(word);
-                if (!line.empty() && Width(next) > details.width) {
+                if (!line.empty() && Width(next) > width) {
                     lines.push_back({std::move(line), ink});
                     line.assign(word);
                 } else {
@@ -218,26 +224,37 @@ class InventoryPanel {
         if (!line.empty()) lines.push_back({std::move(line), ink});
     }
 
-    std::vector<Line> ItemDetails(oCItem& item) {
+    std::vector<Line> ItemDetails(oCItem& item, int width) {
         std::vector<Line> lines;
+        const auto wrap = [&](std::string text, unsigned long ink = Paper) {
+            if (cyrillic) Normalize(text);
+            Wrap(lines, text, width, ink);
+        };
         const auto add = [&](const wchar_t* ru, const char* en, int value, unsigned long ink = Paper) {
-            lines.push_back({Label(ru, en) + "  " + std::to_string(value), ink});
+            wrap(Label(ru, en) + "  " + std::to_string(value), ink);
         };
         const std::string name = item.name.ToChar();
-        Wrap(lines, name, Bright);
+        wrap(name, Bright);
         if (item.flags & ITM_FLAG_ACTIVE) {
-            lines.push_back({Label(L"Экипировано", "Equipped"), Equipped});
+            wrap(Label(L"Экипировано", "Equipped"), Equipped);
         }
-        const int classId = static_cast<int>(Classify(item));
-        const auto& categoryLabel = CategoryLabels[classId];
-        lines.push_back({Label(categoryLabel.ru, categoryLabel.en), Bronze});
-        lines.push_back({});
-        if (classId == static_cast<int>(Category::Weapons)) {
-            add(L"Урон", "Damage", WeaponDamage(item));
-            if (item.mainflag & ITM_CAT_NF && item.range > 0) add(L"Дальность удара", "Melee reach", item.range);
+        const bool weapon = Classify(item) == Category::Weapons;
+        const int damage = weapon ? WeaponDamage(item) : 0;
+        if (weapon) {
+            const auto parts = std::count_if(std::begin(item.damage), std::end(item.damage), [](int value) { return value != 0; });
+            std::string total = Label(L"Урон", "Damage") + "  " + std::to_string(damage);
             for (int i = 0; i < oEDamageIndex_MAX; ++i) {
-                if (item.damage[i]) add(DamageLabels[i].ru, DamageLabels[i].en, item.damage[i]);
+                if (parts == 1 && damage != 0 && item.damage[i] == damage) {
+                    total += " (" + Label(DamageLabels[i].ru, DamageLabels[i].en) + ")";
+                }
             }
+            wrap(std::move(total));
+            for (int i = 0; i < oEDamageIndex_MAX; ++i) {
+                if (item.damage[i] && (parts != 1 || item.damage[i] != damage)) {
+                    add(DamageLabels[i].ru, DamageLabels[i].en, item.damage[i]);
+                }
+            }
+            if (item.mainflag & ITM_CAT_NF && item.range > 0) add(L"Дальность удара", "Melee reach", item.range);
         }
         bool hasProtection = false;
         for (int i = 0; i < oEDamageIndex_MAX; ++i) {
@@ -245,61 +262,93 @@ class InventoryPanel {
             if (!std::exchange(hasProtection, true)) lines.push_back({Label(L"Защита", "Protection"), Bronze});
             add(DamageLabels[i].ru, DamageLabels[i].en, item.protection[i]);
         }
-        bool hasRequirements = false;
         for (int i = 0; i < ITM_COND_MAX; ++i) {
             const int attribute = item.cond_atr[i], required = item.cond_value[i];
             if (required <= 0 || attribute < 0 || attribute >= NPC_ATR_MAX) continue;
-            if (!std::exchange(hasRequirements, true)) {
-                lines.push_back({Label(L"Требования", "Requirements"), Bronze});
-            }
             const auto& label = AttributeLabels[attribute];
             const int current = player->GetAttribute(attribute);
-            add(label.ru, label.en, required, current < required ? Missing : Paper);
+            wrap(Label(L"Требуется", "Requires") + "  " + Label(label.ru, label.en) + " " + std::to_string(required),
+                 current < required ? Missing : Paper);
         }
         if (item.mag_circle > 0) add(L"Круг магии", "Circle of magic", item.mag_circle);
         for (int i = 0; i < ITM_COND_MAX; ++i) {
             const int attribute = item.change_atr[i], change = item.change_value[i];
             if (!change || attribute < 0 || attribute >= NPC_ATR_MAX) continue;
             const auto& label = AttributeLabels[attribute];
-            lines.push_back({Label(label.ru, label.en) + (change > 0 ? "  +" : "  ") + std::to_string(change), Paper});
+            wrap(Label(label.ru, label.en) + (change > 0 ? "  +" : "  ") + std::to_string(change));
         }
         const std::string description = item.GetDescription().ToChar();
-        if (!description.empty() && description != name) {
-            lines.push_back({});
-            Wrap(lines, description, Paper);
-        }
+        if (description != name) wrap(description);
+        const auto hasRequirement = [&](int attribute, int value) {
+            for (int i = 0; i < ITM_COND_MAX; ++i) {
+                if (item.cond_atr[i] == attribute && item.cond_value[i] == value) return true;
+            }
+            return false;
+        };
         for (int i = 0; i < ITM_TEXT_MAX; ++i) {
             const std::string text = item.GetText(i).ToChar();
             if (text.empty() || text == name || text == description) continue;
             const int value = item.GetCount(i);
-            Wrap(lines, value != 0 ? text + "  " + std::to_string(value) : text, Paper);
+            const auto end = text.find_last_not_of(" :\t");
+            const std::string_view label(text.data(), end == std::string::npos ? 0 : end + 1);
+            if (value > 0 && ((weapon && value == damage && label == Label(L"Урон", "Damage"))
+                || (value == item.value && (label == Label(L"Цена", "Value") || label == "Price"))
+                || (hasRequirement(NPC_ATR_STRENGTH, value) && label == Label(L"Необходимо силы", "Strength required"))
+                || (hasRequirement(NPC_ATR_DEXTERITY, value) && label == Label(L"Необходимо ловкости", "Dexterity required")))) continue;
+            wrap(value != 0 ? text + "  " + std::to_string(value) : text);
         }
-        lines.push_back({});
         if (item.amount > 1) add(L"В стопке", "Stack", item.amount);
-        if (item.value > 0) add(L"Цена за штуку", "Value per item", item.value);
+        if (item.value > 0) {
+            if (item.amount > 1) add(L"Цена за штуку", "Value per item", item.value);
+            else add(L"Цена", "Value", item.value);
+        }
         if (item.weight > 0) add(L"Вес", "Weight", item.weight);
         return lines;
     }
 
-    void DrawDetails(oCItem* item) {
+    void DrawTooltip(oCItem* item, std::optional<POINT> point) {
         const int instance = item ? item->GetInstance() : -1;
-        if (previousDetail != item || previousDetailInstance != instance) {
-            previousDetail = item;
-            previousDetailInstance = instance;
-            detailTop = 0;
+        if (tooltipItem != item || tooltipInstance != instance) {
+            tooltipItem = item;
+            tooltipInstance = instance;
+            tooltipTop = tooltipMaxTop = 0;
         }
-        if (!item) {
-            detailCount = 0;
-            Text(details.x, details.y, Label(L"Наведите на предмет", "Point at an item"), details.width, Bronze);
-            return;
+        if (!item || !point) return;
+        const int gap = std::clamp(screen->psizey / 64, 10, 24);
+        const int pad = std::clamp(screen->psizey / 110, 6, 12);
+        const int cardWidth = (std::min)(std::clamp(screen->psizex * 2 / 5, 260, 480), screen->psizex / 2 - gap - 2);
+        const int maxWidth = cardWidth - 2 * pad;
+        const int maxRows = (screen->psizey * 3 / 4 - 2 * pad) / lineHeight;
+        const auto lines = ItemDetails(*item, maxWidth);
+        if (lines.empty() || maxRows < 3) return;
+        int width = 0;
+        for (const auto& line : lines) width = (std::max)(width, Width(line.text));
+        const int count = static_cast<int>(lines.size());
+        const bool scrolls = count > maxRows;
+        const int rows = scrolls ? maxRows - 1 : count;
+        const auto scrollHint = scrolls ? Label(L"Shift + колесо", "Shift + wheel") : std::string{};
+        if (scrolls) width = (std::max)(width, Width(scrollHint));
+        width = (std::min)(width, maxWidth);
+        tooltipMaxTop = count - rows;
+        tooltipTop = std::clamp(tooltipTop, 0, tooltipMaxTop);
+
+        const Box card = InventoryLayout::PlaceTooltip({1, 1, screen->psizex - 2, screen->psizey - 2},
+            point->x, point->y, width + 2 * pad, (rows + scrolls) * lineHeight + 2 * pad, gap);
+        Place(tooltipText, card);
+        tooltipText.ClrPrintwin();
+        const auto alpha = zrenderer->GetAlphaBlendSource();
+        zrenderer->SetAlphaBlendSource(zRND_ALPHA_SOURCE_MATERIAL);
+        Fill(card, Rule);
+        Fill({card.x + 1, card.y + 1, card.width - 2, card.height - 2}, 0xFF202318);
+        zrenderer->SetAlphaBlendSource(alpha);
+        for (int row = 0; row < rows; ++row) {
+            const auto& line = lines[tooltipTop + row];
+            DrawText(tooltipText, card.x + pad, card.y + pad + row * lineHeight, line.text, width, line.ink);
         }
-        const auto lines = ItemDetails(*item);
-        detailCount = static_cast<int>(lines.size());
-        detailTop = std::clamp(detailTop, 0, (std::max)(0, detailCount - detailRows));
-        for (int i = detailTop; i < detailCount && i < detailTop + detailRows; ++i) {
-            Text(details.x, details.y + (i - detailTop) * lineHeight, lines[i].text, details.width, lines[i].ink);
+        if (scrolls) {
+            DrawText(tooltipText, card.x + pad, card.y + pad + rows * lineHeight, scrollHint, width, Bronze);
         }
-        ScrollBar(detailBar, detailRows, detailCount, detailTop);
+        tooltipText.DrawItems();
     }
 
 public:
@@ -324,26 +373,27 @@ public:
 
     void Layout() {
         panel.SetFont(screen->GetFont());
-        const int w = (std::min)(screen->psizex * 92 / 100, screen->psizey * 145 / 100);
-        const int h = screen->psizey * 77 / 100;
+        textView.SetFont(screen->GetFont());
+        tooltipText.SetFont(screen->GetFont());
+        inset = std::clamp(screen->psizey / 48, 10, 26);
+        lineHeight = (std::max)(12, panel.GetFont()->GetFontY()) + 4;
+        const int w = (std::min)(screen->psizex * 92 / 100, (std::max)(460, screen->psizey * 91 / 100));
+        const int bodyTop = inset + 2 * lineHeight + 18;
+        const int footerSpace = inset + lineHeight + 13;
+        const int scrollWidth = (std::max)(8, inset / 2);
+        grid = InventoryLayout::MakeGrid({inset, bodyTop, w - 2 * inset - scrollWidth,
+                                          screen->psizey * 78 / 100 - bodyTop - footerSpace},
+                                          std::clamp(screen->psizey / 10, 52, 128), 4);
+        const int h = grid.area.Bottom() + footerSpace;
         bounds = {(screen->psizex - w) / 2, (screen->psizey - h) / 2, w, h};
         Place(panel, bounds);
         Place(textView, bounds);
-        textView.SetFont(screen->GetFont());
-        inset = std::clamp(screen->psizey / 48, 10, 26);
-        lineHeight = (std::max)(12, panel.GetFont()->GetFontY()) + 4;
+        grid.area.x += bounds.x;
+        grid.area.y += bounds.y;
         const int top = bounds.y + inset;
         close = {bounds.Right() - inset - Width("Esc") - 8, top, Width("Esc") + 8, lineHeight};
         tabs = {bounds.x + inset, top + lineHeight + 4, w - 2 * inset, lineHeight + 5};
-        const int bodyY = tabs.Bottom() + 9, bodyBottom = bounds.Bottom() - inset - lineHeight - 5;
-        const int divider = bounds.x + w * 62 / 100;
-        const int scrollWidth = (std::max)(8, inset / 2);
-        grid = InventoryLayout::MakeGrid({bounds.x + inset, bodyY, divider - bounds.x - 2 * inset - scrollWidth,
-                                          bodyBottom - bodyY}, std::clamp(screen->psizey / 10, 60, 128), 4);
-        listBar = {divider - inset - scrollWidth, bodyY, scrollWidth, grid.area.height};
-        details = {divider + inset, bodyY, bounds.Right() - inset - divider - inset - scrollWidth, bodyBottom - bodyY};
-        detailBar = {details.Right() + 3, bodyY, scrollWidth - 3, details.height};
-        detailRows = (std::max)(1, details.height / lineHeight);
+        listBar = {grid.area.Right(), grid.area.y, scrollWidth, grid.area.height};
     }
 
     void Refresh(oCNpcInventory& inv) {
@@ -385,7 +435,7 @@ public:
         const int next = (static_cast<int>(category) + delta + CategoryCount) % CategoryCount;
         if (next == static_cast<int>(category)) return;
         category = static_cast<Category>(next);
-        firstRow = detailTop = 0;
+        firstRow = tooltipTop = 0;
         selected = -1;
         selectedItem = lastClicked = nullptr;
         useSelection = true;
@@ -400,14 +450,16 @@ public:
     }
 
     void Scroll(POINT p, int wheel) {
-        if (!wheel) return;
+        if (!wheel || !bounds.Hit(p.x, p.y)) return;
         lastClicked = nullptr;
-        if (details.Hit(p.x, p.y) || detailBar.Hit(p.x, p.y)) {
-            useSelection = true;
-            detailTop = std::clamp(detailTop - 3 * wheel, 0, (std::max)(0, detailCount - detailRows));
-        } else if (bounds.Hit(p.x, p.y)) {
-            firstRow = std::clamp(firstRow - wheel, 0, grid.LastRow(static_cast<int>(entries.size())));
+        if (tooltipMaxTop > 0 && (GetKeyState(VK_SHIFT) & 0x8000)) {
+            auto* item = Item(ItemAt(p));
+            if (item && item == tooltipItem && item->GetInstance() == tooltipInstance) {
+                tooltipTop = std::clamp(tooltipTop - 3 * wheel, 0, tooltipMaxTop);
+                return;
+            }
         }
+        firstRow = std::clamp(firstRow - wheel, 0, grid.LastRow(static_cast<int>(entries.size())));
     }
 
     Command Click(POINT p, oCNpcInventory& inv) {
@@ -421,13 +473,6 @@ public:
             const int last = grid.LastRow(static_cast<int>(entries.size()));
             if (last > 0) firstRow = std::clamp(MulDiv(p.y - listBar.y, last, (std::max)(1, listBar.height - 1)), 0, last);
             lastClicked = nullptr;
-            return Command::None;
-        }
-        if (detailBar.Hit(p.x, p.y)) {
-            useSelection = true;
-            lastClicked = nullptr;
-            const int last = (std::max)(0, detailCount - detailRows);
-            detailTop = std::clamp(MulDiv(p.y - detailBar.y, last, (std::max)(1, detailBar.height - 1)), 0, last);
             return Command::None;
         }
         const int index = ItemAt(p);
@@ -470,7 +515,6 @@ public:
                  active || (point && cell.Hit(point->x, point->y)) ? Bright : counts[i] ? Bronze : Paper);
             if (active) Fill({cell.x + 5, cell.Bottom() - 2, cell.width - 10, 2}, Bronze);
         }
-        Fill({details.x - inset, details.y, 1, details.height}, Rule);
         if (entries.empty()) {
             Text(grid.area.x, grid.area.y, Label(L"Здесь пока пусто", "No items in this category"), grid.area.width, Bronze);
         }
@@ -489,7 +533,6 @@ public:
             }
         }
         ScrollBar(listBar, grid.rows, (static_cast<int>(entries.size()) + grid.columns - 1) / grid.columns, firstRow);
-        DrawDetails(hover >= 0 ? Item(hover) : useSelection ? Item(selected) : nullptr);
         const int footer = bounds.Bottom() - inset - lineHeight;
         Fill({left, footer - 5, tabs.width, 1}, Rule);
         Text(left, footer, Label(L"ЛКМ  Выбрать     Двойной клик / Enter  Использовать     Tab  Категория",
@@ -499,13 +542,19 @@ public:
         oCItem::SetLightingSwell(FALSE);
         for (int slot = 0; slot < slots; ++slot) {
             auto* item = Item(first + slot);
-            if (!item || !item->GetVisual()) continue;
+            if (!item) continue;
             const auto cell = grid.Cell(slot);
             Place(preview, {cell.x + 3, cell.y + 4, cell.width - 6, cell.height - 9});
+            // The native preview world can load a visual when the item is added to it.
             item->RenderItem(inv.rndWorld, &preview, 0.0f);
+            if (!item->GetVisual()) {
+                const int labelWidth = cell.width - 10 - (item->amount > 1 ? Width(std::to_string(item->amount)) : 0);
+                Text(cell.x + 4, cell.Bottom() - lineHeight, item->name.ToChar(), labelWidth, Paper);
+            }
         }
         oCItem::SetLightingSwell(TRUE);
         textView.DrawItems();
+        DrawTooltip(Item(hover), point);
         if (point && cursor.backTex) {
             CURSORINFO info{};
             info.cbSize = sizeof(info);

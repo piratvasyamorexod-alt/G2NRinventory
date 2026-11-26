@@ -16,7 +16,7 @@ int main() {
 
     for (const auto available : {Box{10, 15, 250, 170}, Box{10, 15, 480, 270}, Box{10, 15, 900, 650}}) {
         const auto grid = MakeGrid(available, 95, 4);
-        assert(grid.columns >= 4 && grid.columns <= 6);
+        assert(grid.columns >= 4 && grid.columns <= 7);
         assert(grid.area.Right() <= available.Right() && grid.area.Bottom() <= available.Bottom());
         assert(grid.LastRow(0) == 0);
         const int count = grid.columns * (grid.rows + 2) + 1;
@@ -29,4 +29,12 @@ int main() {
         assert(grid.ItemAt(lastVisible.x, lastVisible.y, firstRow, count) == count - 1);
         assert(grid.ItemAt(lastVisible.Right() + grid.gap, lastVisible.y, firstRow, count) == -1);
     }
+
+    const Box viewport{1, 1, 1918, 1078};
+    const auto nearPointer = PlaceTooltip(viewport, 650, 400, 330, 160, 16);
+    assert(nearPointer.x == 666 && nearPointer.y == 416);
+    const auto nearEdges = PlaceTooltip(viewport, 1915, 1075, 330, 160, 16);
+    assert(nearEdges.Right() == 1899 && nearEdges.Bottom() == 1059);
+    const auto tall = PlaceTooltip(viewport, 1800, 500, 480, 800, 16);
+    assert(tall.Right() == 1784 && tall.y == viewport.y && tall.Bottom() <= viewport.Bottom());
 }
