@@ -787,7 +787,8 @@ public:
         zrenderer->SetAlphaBlendSource(previousAlpha);
         textView.DrawItems();
         if (quantity) DrawQuantity(point);
-        else if (!dragging) DrawTooltip(Item(hover), Amount(hover), point);
+        else if (dragging) DrawTooltip(nullptr, 0, std::nullopt);
+        else DrawTooltip(Item(hover), Amount(hover), point);
         DrawCursor(point);
     }
 };
@@ -884,7 +885,8 @@ public:
         if (!IsDragging()) return nullptr;
         for (auto* node = inv.inventory.GetNextInList(); node; node = node->GetNextInList()) {
             auto* item = node->GetData();
-            if (item == pressedItem->item && item->GetInstance() == pressedItem->instance && item->amount > 0) return item;
+            if (item == pressedItem->item && item->GetInstance() == pressedItem->instance
+                && item->amount > 0 && ActionFor(*item) != HotbarAction::None) return item;
         }
         return nullptr;
     }
@@ -953,7 +955,7 @@ public:
             if (!pointer) return Command::None;
             if (started.dragging) {
                 const int slot = InventoryLayout::PlaceHotbar(screen->psizex, screen->psizey).Hit(pointer->x, pointer->y);
-                if (slot >= 0 && dragged && ActionFor(*dragged) != HotbarAction::None && StockFor(inv, started.instance).item) {
+                if (slot >= 0 && dragged && StockFor(inv, started.instance).item) {
                     history.SetHotbar(slot, started.instance);
                 }
             } else if (auto* item = panel.PressSource(*pointer); item == started.item && item->GetInstance() == started.instance) {
@@ -1076,6 +1078,7 @@ auto HotbarKeyHook = Union::CreateHook(
 
 int __fastcall HotbarKey(oCGame* game, void* edx, int key) {
     if (key < KEY_F1 || key > KEY_F10 || game != ogame || history.Hotbar()[key - KEY_F1] < 0
+        || ((GetAsyncKeyState(VK_MENU) | GetAsyncKeyState(VK_CONTROL) | GetAsyncKeyState(VK_SHIFT)) & 0x8000)
         || !InventoryMouse::HasFocus(hWndApp) || !HotbarInWorld()) return HotbarKeyHook(game, edx, key);
     const int slot = key - KEY_F1;
     const bool held = (GetAsyncKeyState(VK_F1 + slot) & 0x8000) != 0;

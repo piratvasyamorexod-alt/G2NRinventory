@@ -63,22 +63,19 @@ void UseHotbar(int slot) {
     }
     if (!stock.item) return;
     const auto action = ActionFor(*stock.item);
+    if (action == HotbarAction::None || (action == HotbarAction::Equip && (stock.item->flags & ITM_FLAG_ACTIVE))) return;
     auto* events = player->GetEM();
     if (!events || !events->IsEmpty(TRUE)) return;
-    switch (action) {
-    case HotbarAction::Equip:
-        if (stock.item->flags & ITM_FLAG_ACTIVE) return;
-        events->OnMessage(new oCMsgManipulate(oCMsgManipulate::EV_EQUIPITEM, stock.item), nullptr);
-        break;
-    case HotbarAction::Use:
-        events->OnMessage(new oCMsgManipulate(oCMsgManipulate::EV_USEITEMTOSTATE, stock.item, 0), nullptr);
-        break;
-    case HotbarAction::Torch:
+    if (action == HotbarAction::Torch) {
         player->UseItem(stock.item);
-        break;
-    case HotbarAction::None:
-        break;
+        return;
     }
+    auto* symbol = parser ? parser->GetSymbol(instance) : nullptr;
+    if (!symbol) return;
+    // The inventory can change before the native event runs. Let the engine
+    // look up the current stack by its script instance when it handles the event.
+    const auto type = action == HotbarAction::Equip ? oCMsgManipulate::EV_EQUIPITEM : oCMsgManipulate::EV_USEITEMTOSTATE;
+    events->OnMessage(new oCMsgManipulate(type, symbol->name, 0), player);
 }
 
 class HotbarPanel {
