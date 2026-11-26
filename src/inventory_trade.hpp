@@ -369,7 +369,7 @@ public:
         if (deal) return;
         if (ui.tooltipMaxTop > 0 && (GetKeyState(VK_SHIFT) & 0x8000)) {
             if (const auto choice = Hit(point)) {
-                const auto* item = Item(*choice)->item;
+                auto* item = Item(*choice)->item;
                 if (item == ui.tooltipItem && item->GetInstance() == ui.tooltipInstance) {
                     ui.tooltipTop = std::clamp(ui.tooltipTop - 3 * wheel, 0, ui.tooltipMaxTop);
                     return;
