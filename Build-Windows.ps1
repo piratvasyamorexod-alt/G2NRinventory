@@ -21,7 +21,7 @@ git -C $template checkout --detach --force $templateCommit
 Check "Failed to select pinned Union template"
 git -C $template submodule update --init --recursive
 Check "Failed to fetch Union dependencies"
-$sources = @("Plugin.ipp", "inventory_layout.hpp", "inventory_history.hpp", "inventory_tracking.hpp", "mouse_win32.hpp", "inventory_cursor.rc", "inventory_cursor.cur")
+$sources = @("Plugin.ipp", "inventory_layout.hpp", "inventory_history.hpp", "inventory_tracking.hpp", "mouse_win32.hpp", "odyssee_document_reads.hpp", "inventory_cursor.rc", "inventory_cursor.cur")
 foreach ($source in $sources) {
   Copy-Item (Join-Path $root "src/$source") (Join-Path $template "src/$source") -Force
 }
@@ -33,7 +33,7 @@ foreach ($texture in @("G2NRI_PANEL-C.TEX", "G2NRI_SOLID-C.TEX", "G2NRI_CURSOR-C
 $cmake = Join-Path $template "CMakeLists.txt"
 $body = [IO.File]::ReadAllText($cmake)
 $body = $body.Replace("project(UnionPlugin", "project(G2NRinventory")
-$body = $body.Replace('VERSION ${PROJECT_VERSION}', 'VERSION 0.1.4.0')
+$body = $body.Replace('VERSION ${PROJECT_VERSION}', 'VERSION 0.1.5.0')
 if ($body -notmatch "project\(G2NRinventory") { throw "Upstream CMake file changed" }
 $body += "`r`ntarget_sources(G2NRinventory PRIVATE src/inventory_cursor.rc)`r`n"
 $body += 'target_compile_options(G2NRinventory PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:/utf-8>")' + "`r`n"

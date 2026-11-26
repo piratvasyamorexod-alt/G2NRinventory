@@ -1,5 +1,6 @@
 #include "../src/inventory_layout.hpp"
 #include "../src/inventory_history.hpp"
+#include "../src/odyssee_document_reads.hpp"
 
 #include <cassert>
 #include <climits>
@@ -73,6 +74,18 @@ int main() {
     std::istringstream legacyRecent("G2NRinventory 2\nR LEGACY_DOCUMENT\nS LEGACY_DOCUMENT 1\n");
     loaded.Load(legacyRecent, [](const std::string&) { return 6; });
     assert(loaded.Rank(6) == 0 && loaded.ReadingState(6) == DocumentState::Unknown && loaded.ForSale(6) == 1);
+    using OdysseeDocumentReads::HasReadEvidence;
+    const auto noFlag = [](const char*) { return false; };
+    const auto chronicleRead = [](std::string_view flag) { return flag == "TAMORACHRONIK3"; };
+    assert(HasReadEvidence("ITWR_TAMORACHRONIK3", "USETAMORACHRONIK3", 0, chronicleRead));
+    assert(!HasReadEvidence("ITWR_TAMORACHRONIK4", "USETAMORACHRONIK4", 0, chronicleRead));
+    assert(!HasReadEvidence("ITWR_TAMORACHRONIK3", "OTHER_READER", 0, chronicleRead));
+    assert(!HasReadEvidence("ITWR_TAMORACHRONIK3", "USETAMORACHRONIK3", 0, noFlag));
+    assert(HasReadEvidence("ITWR_EISENBARTSDOKUMENT2", "USE_EISENBARTSDOKUMENT2", 2, noFlag));
+    assert(!HasReadEvidence("ITWR_EISENBARTSDOKUMENT3", "USE_EISENBARTSDOKUMENT3", 2, noFlag));
+    for (const auto& rule : OdysseeDocumentReads::rules) {
+        assert(HasReadEvidence(rule.item, rule.reader, 0, [&](std::string_view flag) { return flag == rule.flag; }));
+    }
     for (int index = 100; index < 200; ++index) history.Acquire(index);
     assert(history.Recent().size() == InventoryHistory::History::MaximumRecent);
     assert(history.Rank(20) == -1 && history.Rank(199) == 0 && history.ReadingState(20) == DocumentState::Read);

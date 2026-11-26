@@ -3,6 +3,7 @@
 #include "inventory_layout.hpp"
 #include "inventory_history.hpp"
 #include "mouse_win32.hpp"
+#include "odyssee_document_reads.hpp"
 
 #include <array>
 #include <climits>
@@ -965,7 +966,6 @@ void __cdecl PollInventory() {
         // The engine owns these stacks. Materialize them once so every category can be listed.
         if (inv.GetNumItemsInPackString() > 0) inv.UnpackAllItems();
         ObserveOwnedDocuments(inv);
-        ImportOdysseeDocumentProgress();
         next->panel.Layout();
         next->panel.Refresh(inv);
         session = std::move(next);

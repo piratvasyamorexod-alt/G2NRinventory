@@ -18,21 +18,33 @@ std::optional<InventoryHistory::DocumentState> DocumentReadingState(oCItem& item
     return history.ReadingState(item.GetInstance());
 }
 
-void ObserveOwnedDocuments(oCNpcInventory& inv) {
-    for (auto* node = inv.inventory.GetNextInList(); node; node = node->GetNextInList()) {
-        history.ObserveDocument(DocumentInstance(node->GetData()));
-    }
+std::optional<int> DocumentScriptInt(const char* name) {
+    auto* symbol = parser ? parser->GetSymbol(zSTRING(name)) : nullptr;
+    if (!symbol || symbol->type != zPAR_TYPE_INT || !symbol->ele) return std::nullopt;
+    int value = 0;
+    symbol->GetValue(value, 0);
+    return value;
 }
 
-void ImportOdysseeDocumentProgress() {
-    auto* stage = parser ? parser->GetSymbol(zSTRING("TAMORAEINSIEDLERBRIEFGELESEN")) : nullptr;
-    if (!stage || stage->type != zPAR_TYPE_INT || !stage->ele) return;
-    int progress = 0;
-    stage->GetValue(progress, 0);
-    // Each of these three documents advances this counter once, after Doc_Show.
-    constexpr std::array names{"ITWR_EISENBARTSDOKUMENT", "ITWR_EISENBARTSDOKUMENT2", "ITWR_EISENBARTSDOKUMENT3"};
-    if (progress < 1 || progress > static_cast<int>(names.size())) return;
-    for (int i = 0; i < progress; ++i) history.MarkRead(parser->GetIndex(zSTRING(names[i])));
+void ObserveOwnedDocuments(oCNpcInventory& inv) {
+    const auto ironbeardProgress = DocumentScriptInt("TAMORAEINSIEDLERBRIEFGELESEN");
+    for (auto* node = inv.inventory.GetNextInList(); node; node = node->GetNextInList()) {
+        auto* item = node->GetData();
+        const int instance = DocumentInstance(item);
+        if (instance < 0) continue;
+        history.ObserveDocument(instance);
+        if (!ironbeardProgress || history.ReadingState(instance) == InventoryHistory::DocumentState::Read) continue;
+
+        const auto* itemSymbol = parser->GetSymbol(instance);
+        const auto* readerSymbol = parser->GetSymbol(item->GetStateEffectFunc(0));
+        if (!itemSymbol || itemSymbol->name.IsEmpty() || !readerSymbol || readerSymbol->name.IsEmpty()) continue;
+        auto itemName = itemSymbol->name;
+        auto readerName = readerSymbol->name;
+        if (OdysseeDocumentReads::HasReadEvidence(itemName.Upper().ToChar(), readerName.Upper().ToChar(), *ironbeardProgress,
+                                                [](const char* flag) { return DocumentScriptInt(flag) == 1; })) {
+            history.MarkRead(instance);
+        }
+    }
 }
 
 std::filesystem::path HistoryPath(oCSavegameManager* manager, int slot) {
@@ -89,7 +101,6 @@ void __fastcall LoadHistory(oCGame* game, void* edx, int slot, int globals) {
     trackingPaused = previous;
     if (globals && slot >= 0) {
         ReadHistory(HistoryPath(game->savegameManager, slot));
-        ImportOdysseeDocumentProgress();
         if (player) ObserveOwnedDocuments(player->inventory2);
     }
 }
