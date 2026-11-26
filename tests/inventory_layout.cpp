@@ -35,6 +35,12 @@ int main() {
     history.Acquire(20);
     assert(history.WasRead(20) && !history.WasRead(21));
     history.SetForSale(20, 15);
+    assert(!history.HasHotbar());
+    history.SetHotbar(0, 20);
+    history.SetHotbar(9, 21);
+    history.SetHotbar(10, 22);
+    history.SetHotbar(-1, 22);
+    assert(history.HasHotbar() && history.Hotbar()[0] == 20 && history.Hotbar()[9] == 21);
     int reserved = history.ForSale(20);
     assert(AllocateSale(4, reserved) == 4);
     assert(AllocateSale(16, reserved) == 11);
@@ -44,7 +50,8 @@ int main() {
     assert(history.ForSale(21) == 1);
     std::stringstream save;
     history.Save(save, [](int instance) { return "IT_TEST_" + std::to_string(instance); });
-    save << "R MISSING_SYMBOL\nD MISSING_SYMBOL\nU IT_TEST_21\nO IT_TEST_22\n";
+    save << "R MISSING_SYMBOL\nD MISSING_SYMBOL\nU IT_TEST_21\nO IT_TEST_22\n"
+         << "H MISSING_SYMBOL 0\nH IT_TEST_22 10\nH IT_TEST_22 -1\n";
     InventoryHistory::History loaded;
     loaded.Load(save, [](const std::string& name) {
         return name.compare(0, 8, "IT_TEST_") == 0 ? std::stoi(name.substr(8)) + 100 : -1;
@@ -54,13 +61,16 @@ int main() {
     loaded.MarkRead(121);
     assert(loaded.WasRead(121));
     assert(loaded.ForSale(120) == 15 && loaded.ForSale(121) == 1);
+    assert(loaded.Hotbar()[0] == 120 && loaded.Hotbar()[9] == 121 && loaded.Hotbar()[8] == -1);
+    loaded.SetHotbar(0, -1);
+    assert(loaded.Hotbar()[0] == -1 && loaded.HasHotbar());
     loaded.ReconcileSale({{120, 7}});
     assert(loaded.ForSale(120) == 7 && loaded.ForSale(121) == 0);
     loaded.SetForSale(120, 7 - 7);
     assert(!loaded.HasSale());
     std::istringstream previousVersion("G2NRinventory 1\nR HERE\nD HERE\n");
     loaded.Load(previousVersion, [](const std::string&) { return 5; });
-    assert(loaded.Rank(5) == 0 && loaded.WasRead(5) && !loaded.HasSale());
+    assert(loaded.Rank(5) == 0 && loaded.WasRead(5) && !loaded.HasSale() && !loaded.HasHotbar());
     std::istringstream legacyRecent("G2NRinventory 2\nR LEGACY_DOCUMENT\nS LEGACY_DOCUMENT 1\n");
     loaded.Load(legacyRecent, [](const std::string&) { return 6; });
     assert(loaded.Rank(6) == 0 && !loaded.WasRead(5) && !loaded.WasRead(6) && loaded.ForSale(6) == 1);
@@ -89,6 +99,19 @@ int main() {
     assert(panel.x > 1920 / 2 && panel.Right() == 1920 - 26 && panel.y == 150);
     const auto compact = MakeGrid({0, 0, 557, 680}, 77, 3);
     assert(compact.columns == 7 && compact.rows == 8 && compact.size == 77);
+
+    for (const auto viewport : {Box{0, 0, 480, 360}, Box{0, 0, 1920, 1080}, Box{0, 0, 3840, 2160}}) {
+        const auto bar = PlaceHotbar(viewport.width, viewport.height);
+        assert(bar.bounds.x > 0 && bar.bounds.Right() < viewport.width && bar.bounds.Bottom() < viewport.height / 4);
+        for (int i = 0; i < HotbarSlots; ++i) {
+            const auto cell = bar.Cell(i);
+            assert(bar.Hit(cell.x, cell.y) == i && bar.Hit(cell.Right() - 1, cell.Bottom() - 1) == i);
+            assert(bar.Hit(cell.Right(), cell.y) == -1);
+        }
+    }
+    assert(!DraggedEnough(102, 96, 100, 100, 6));
+    assert(DraggedEnough(94, 100, 100, 100, 6));
+    assert(DraggedEnough(100, 107, 100, 100, 6));
 
     const Box heroTabs{510, 110, 483, 50};
     for (int i = 0; i < static_cast<int>(Category::Count); ++i) {

@@ -3,12 +3,14 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cstdlib>
 #include <optional>
 #include <string_view>
 #include <vector>
 
 namespace InventoryLayout {
 
+inline constexpr int HotbarSlots = 10;
 enum class Category { Recent, All, Weapons, Armor, Ammo, Magic, Supplies, Documents, Other, Sale, Count };
 using CategoryWidths = std::array<int, static_cast<int>(Category::Count)>;
 
@@ -18,6 +20,33 @@ struct Box {
     int Bottom() const { return y + height; }
     bool Hit(int px, int py) const { return x <= px && px < Right() && y <= py && py < Bottom(); }
 };
+
+struct HotbarLayout {
+    Box bounds;
+    int cellSize, gap, inset;
+
+    Box Cell(int index) const {
+        return {bounds.x + inset + index * (cellSize + gap), bounds.y + inset, cellSize, cellSize};
+    }
+
+    int Hit(int x, int y) const {
+        for (int i = 0; i < HotbarSlots; ++i) if (Cell(i).Hit(x, y)) return i;
+        return -1;
+    }
+};
+
+inline HotbarLayout PlaceHotbar(int width, int height) {
+    const int gap = std::clamp(height / 450, 2, 4);
+    const int inset = 2 * gap;
+    const int maxSize = (width - 2 * inset - (HotbarSlots + 1) * gap) / HotbarSlots;
+    const int size = (std::min)(maxSize, std::clamp(height / 18, 35, 72));
+    const int barWidth = HotbarSlots * size + (HotbarSlots - 1) * gap + 2 * inset;
+    return {{(width - barWidth) / 2, (std::max)(8, height / 36), barWidth, size + 2 * inset}, size, gap, inset};
+}
+
+inline bool DraggedEnough(int x, int y, int initialX, int initialY, int threshold) {
+    return std::abs(x - initialX) >= threshold || std::abs(y - initialY) >= threshold;
+}
 
 inline Box CategoryTab(Box tabs, Category category) {
     const int index = static_cast<int>(category);

@@ -32,7 +32,7 @@ inline bool ClientBounds(HWND window, RECT& bounds) {
 class MouseEvents {
 public:
     struct State {
-        std::optional<POINT> leftClick, rightClick, wheelPosition;
+        std::optional<POINT> leftClick, leftRelease, rightClick, wheelPosition;
         int wheel = 0;
         bool leftShift = false;
     };
@@ -46,12 +46,12 @@ private:
     DWORD listenerId = 0;
     mutable std::mutex inputMutex;
     bool lostFocus = false;
-    bool lowLevelLeft = false, lowLevelRight = false, lowLevelWheel = false;
+    bool lowLevelLeft = false, lowLevelRelease = false, lowLevelRight = false, lowLevelWheel = false;
     State pending;
     int wheelDelta = 0;
 
     static bool IsMouseAction(UINT message) {
-        return message == WM_LBUTTONDOWN || message == WM_RBUTTONDOWN || message == WM_MOUSEWHEEL;
+        return message == WM_LBUTTONDOWN || message == WM_LBUTTONUP || message == WM_RBUTTONDOWN || message == WM_MOUSEWHEEL;
     }
 
     void Record(UINT message, POINT at, int delta, bool lowLevel) {
@@ -59,9 +59,14 @@ private:
         case WM_LBUTTONDOWN:
             if (lowLevel || !lowLevelLeft) {
                 pending.leftClick = at;
+                pending.leftRelease.reset();
                 pending.leftShift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
             }
             lowLevelLeft |= lowLevel;
+            break;
+        case WM_LBUTTONUP:
+            if (lowLevel || !lowLevelRelease) pending.leftRelease = at;
+            lowLevelRelease |= lowLevel;
             break;
         case WM_RBUTTONDOWN:
             if (lowLevel || !lowLevelRight) pending.rightClick = at;
@@ -133,7 +138,7 @@ private:
     void ClearPending() {
         pending = {};
         wheelDelta = 0;
-        lowLevelLeft = lowLevelRight = lowLevelWheel = false;
+        lowLevelLeft = lowLevelRelease = lowLevelRight = lowLevelWheel = false;
     }
 
 public:

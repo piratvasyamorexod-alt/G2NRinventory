@@ -1,6 +1,9 @@
 #pragma once
 
+#include "inventory_layout.hpp"
+
 #include <algorithm>
+#include <array>
 #include <istream>
 #include <map>
 #include <ostream>
@@ -15,9 +18,21 @@ class History {
     std::vector<int> recent;
     std::set<int> readDocuments;
     std::map<int, int> sale;
+    std::array<int, InventoryLayout::HotbarSlots> hotbar;
 
 public:
     static constexpr int MaximumRecent = 64;
+    History() { hotbar.fill(-1); }
+
+    const auto& Hotbar() const { return hotbar; }
+
+    bool HasHotbar() const {
+        return std::any_of(hotbar.begin(), hotbar.end(), [](int instance) { return instance >= 0; });
+    }
+
+    void SetHotbar(int slot, int instance) {
+        if (slot >= 0 && slot < static_cast<int>(hotbar.size())) hotbar[slot] = instance;
+    }
 
     void Acquire(int instance) {
         if (instance < 0) return;
@@ -70,6 +85,7 @@ public:
         recent.clear();
         readDocuments.clear();
         sale.clear();
+        hotbar.fill(-1);
         std::string line;
         if (!std::getline(input, line) || (line != "G2NRinventory 1" && line != "G2NRinventory 2")) return;
         while (std::getline(input, line)) {
@@ -81,6 +97,11 @@ public:
             if (kind == 'D') MarkRead(resolve(name));
             int quantity;
             if (kind == 'S' && record >> quantity && quantity > 0) SetForSale(resolve(name), quantity);
+            int slot;
+            if (kind == 'H' && record >> slot) {
+                const int instance = resolve(name);
+                if (instance >= 0) SetHotbar(slot, instance);
+            }
         }
     }
 
@@ -96,6 +117,11 @@ public:
         for (const auto& [instance, quantity] : sale) {
             const auto name = resolve(instance);
             if (!name.empty()) output << "S " << name << ' ' << quantity << '\n';
+        }
+        for (int i = 0; i < static_cast<int>(hotbar.size()); ++i) {
+            if (hotbar[i] < 0) continue;
+            const auto name = resolve(hotbar[i]);
+            if (!name.empty()) output << "H " << name << ' ' << i << '\n';
         }
     }
 };

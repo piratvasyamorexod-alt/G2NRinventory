@@ -107,6 +107,8 @@ void InitSprite(zCView& view, const char* name, int alpha = 255) {
     view.SetTransparency(alpha);
 }
 
+#include "inventory_hotbar.hpp"
+
 struct DamageLabel { const wchar_t* ru; const char* en; };
 constexpr std::array<DamageLabel, oEDamageIndex_MAX> DamageLabels{{
     {L"Барьер", "Barrier"}, {L"Дробящий", "Blunt"}, {L"Рубящий", "Edge"}, {L"Огонь", "Fire"},
@@ -520,6 +522,12 @@ public:
 
     int Amount(int index) const { return Item(index) ? entries[index].quantity : 0; }
 
+    oCItem* PressSource(POINT point) const {
+        return quantity || category == Category::Sale ? nullptr : Item(ItemAt(point));
+    }
+
+    bool IsPickingQuantity() const { return quantity.has_value(); }
+
     bool SelectNative(oCNpcInventory& inv) const {
         if (category == Category::Sale || quantity || !Item(selected)) return false;
         inv.selectedItem = entries[selected].nativeIndex;
@@ -543,10 +551,13 @@ public:
         const int tabHeight = lineHeight + 5;
         const int bodyTop = inset + lineHeight + 4 + 2 * tabHeight + 7;
         const int footerSpace = inset + lineHeight + 11;
+        const int hotbarBottom = InventoryLayout::PlaceHotbar(screen->psizex, screen->psizey).bounds.Bottom() + gap + 3;
+        const int available = (std::min)(screen->psizey * 77 / 100, screen->psizey - hotbarBottom - inset);
         grid = InventoryLayout::MakeGrid({inset, bodyTop, w - 2 * inset - scrollWidth,
-                                          screen->psizey * 77 / 100 - bodyTop - footerSpace}, target, gap);
+                                          available - bodyTop - footerSpace}, target, gap);
         const int h = grid.area.Bottom() + footerSpace;
         bounds = InventoryLayout::PlacePanel(screen->psizex, screen->psizey, w, h, margin);
+        bounds.y = (std::max)(bounds.y, hotbarBottom);
         Place(panel, bounds);
         Place(textView, bounds);
         grid.area.x += bounds.x;
@@ -711,7 +722,7 @@ public:
         return Command::None;
     }
 
-    void Draw(oCNpcInventory& inv, std::optional<POINT> point) {
+    void Draw(oCNpcInventory& inv, std::optional<POINT> point, bool dragging) {
         Layout();
         Refresh(inv);
         textView.ClrPrintwin();
@@ -776,7 +787,7 @@ public:
         zrenderer->SetAlphaBlendSource(previousAlpha);
         textView.DrawItems();
         if (quantity) DrawQuantity(point);
-        else DrawTooltip(Item(hover), Amount(hover), point);
+        else if (!dragging) DrawTooltip(Item(hover), Amount(hover), point);
         DrawCursor(point);
     }
 };
@@ -794,6 +805,13 @@ class InventorySession {
     RECT client{};
     bool active = false, listening = false, restoreMouse = false, center = true;
     bool leftHeld = false, rightHeld = false;
+    struct Press {
+        oCItem* item;
+        int instance;
+        POINT initial;
+        bool dragging = false;
+    };
+    std::optional<Press> pressedItem;
 
     void ReleaseMouse() {
         if (!std::exchange(active, false)) return;
@@ -825,6 +843,7 @@ class InventorySession {
             events.Discard();
             panel.DragQuantity(std::nullopt, false);
             trade.DragQuantity(std::nullopt, false);
+            pressedItem.reset();
         }
         if (!zinput || !InventoryMouse::HasFocus(window) || !InventoryMouse::ClientBounds(window, client)) {
             return false;
@@ -859,6 +878,17 @@ public:
         return ScreenPoint(point);
     }
 
+    bool IsDragging() const { return pressedItem && pressedItem->dragging; }
+
+    oCItem* DraggedItem(oCNpcInventory& inv) const {
+        if (!IsDragging()) return nullptr;
+        for (auto* node = inv.inventory.GetNextInList(); node; node = node->GetNextInList()) {
+            auto* item = node->GetData();
+            if (item == pressedItem->item && item->GetInstance() == pressedItem->instance && item->amount > 0) return item;
+        }
+        return nullptr;
+    }
+
     bool PollTrade() {
         if (!PrepareMouse()) return false;
         const auto input = events.Take();
@@ -881,24 +911,64 @@ public:
     Command Poll(oCNpcInventory& inv) {
         if (!PrepareMouse()) return Command::None;
         const auto input = events.Take();
-        if (ClickPoint(input.rightClick, VK_RBUTTON, rightHeld)) {
+        if (const auto right = ClickPoint(input.rightClick, VK_RBUTTON, rightHeld)) {
+            if (std::exchange(pressedItem, std::nullopt)) return Command::None;
+            if (!panel.IsPickingQuantity()) {
+                const int slot = InventoryLayout::PlaceHotbar(screen->psizex, screen->psizey).Hit(right->x, right->y);
+                if (slot >= 0) {
+                    history.SetHotbar(slot, -1);
+                    return Command::None;
+                }
+            }
             if (!panel.QuantityKey(KEY_ESCAPE, inv)) return Command::Close;
             return Command::None;
         }
         const auto click = ClickPoint(input.leftClick, VK_LBUTTON, leftHeld);
         const auto wheel = ScreenPoint(input.wheelPosition);
-        panel.DragQuantity(Position(), (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0);
-        if (!click && !(wheel && input.wheel)) return Command::None;
-        panel.Layout();
-        panel.Refresh(inv);
+        const auto point = Position();
+        const bool held = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+        panel.DragQuantity(point, held);
+        const bool release = input.leftRelease.has_value() || !held;
+        if (click || (pressedItem && release) || (wheel && input.wheel)) {
+            panel.Layout();
+            panel.Refresh(inv);
+        }
         const bool shift = input.leftClick ? input.leftShift : (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
-        if (click) return panel.Click(*click, shift, inv);
-        panel.Scroll(*wheel, input.wheel);
+        if (click) {
+            pressedItem.reset();
+            if (!shift) {
+                if (auto* item = panel.PressSource(*click)) pressedItem = Press{item, item->GetInstance(), *click};
+            }
+            if (!pressedItem) return panel.Click(*click, shift, inv);
+        }
+        if (pressedItem) {
+            const auto pointer = input.leftRelease ? ScreenPoint(input.leftRelease) : point;
+            const int threshold = std::clamp(screen->psizey / 160, 4, 9);
+            if (pointer && InventoryLayout::DraggedEnough(pointer->x, pointer->y, pressedItem->initial.x, pressedItem->initial.y, threshold)) {
+                pressedItem->dragging = true;
+            }
+            if (!release) return Command::None;
+            auto* dragged = DraggedItem(inv);
+            const auto started = *std::exchange(pressedItem, std::nullopt);
+            if (!pointer) return Command::None;
+            if (started.dragging) {
+                const int slot = InventoryLayout::PlaceHotbar(screen->psizex, screen->psizey).Hit(pointer->x, pointer->y);
+                if (slot >= 0 && dragged && ActionFor(*dragged) != HotbarAction::None && StockFor(inv, started.instance).item) {
+                    history.SetHotbar(slot, started.instance);
+                }
+            } else if (auto* item = panel.PressSource(*pointer); item == started.item && item->GetInstance() == started.instance) {
+                return panel.Click(*pointer, false, inv);
+            }
+            return Command::None;
+        }
+        if (wheel && input.wheel) panel.Scroll(*wheel, input.wheel);
         return Command::None;
     }
 };
 
 std::unique_ptr<InventorySession> session;
+std::unique_ptr<HotbarPanel> hotbar;
+std::array<bool, HotbarSlots> functionHeld{};
 
 int __fastcall InventoryKey(oCNpcInventory*, void*, int);
 auto KeyHook = Union::CreateHook(
@@ -979,10 +1049,48 @@ void __fastcall DrawInventory(oCItemContainer* container, void* edx) {
         }
     }
     if (session && !session->dialog && PersonalInventory(container)) {
-        session->panel.Draw(player->inventory2, session->Position());
+        session->panel.Draw(player->inventory2, session->Position(), session->IsDragging());
     } else {
         DrawHook(container, edx);
     }
+}
+
+void __cdecl DrawHotbar();
+auto DrawContainersHook = Union::CreateHook(
+    SIGNATURE_OF(&oCItemContainer::Container_Draw), &DrawHotbar, Union::HookType::Hook_Detours);
+
+void __cdecl DrawHotbar() {
+    DrawContainersHook();
+    if (!player || !zrenderer) return;
+    auto& inv = player->inventory2;
+    const bool editing = session && !session->dialog && PersonalInventory(&inv);
+    if (!editing && (!history.HasHotbar() || !HotbarInWorld())) return;
+    if (!hotbar) hotbar = std::make_unique<HotbarPanel>();
+    hotbar->Draw(inv, editing, editing ? session->Position() : std::nullopt,
+                 editing ? session->DraggedItem(inv) : nullptr);
+}
+
+int __fastcall HotbarKey(oCGame*, void*, int);
+auto HotbarKeyHook = Union::CreateHook(
+    SIGNATURE_OF(&oCGame::HandleEvent), &HotbarKey, Union::HookType::Hook_Detours);
+
+int __fastcall HotbarKey(oCGame* game, void* edx, int key) {
+    if (key < KEY_F1 || key > KEY_F10 || game != ogame || history.Hotbar()[key - KEY_F1] < 0
+        || !InventoryMouse::HasFocus(hWndApp) || !HotbarInWorld()) return HotbarKeyHook(game, edx, key);
+    const int slot = key - KEY_F1;
+    const bool held = (GetAsyncKeyState(VK_F1 + slot) & 0x8000) != 0;
+    if (!std::exchange(functionHeld[slot], held)) UseHotbar(slot);
+    return TRUE;
+}
+
+void __fastcall DoneHotbar(oCGame*, void*);
+auto DoneHotbarHook = Union::CreateHook(
+    SIGNATURE_OF(&oCGame::Done), &DoneHotbar, Union::HookType::Hook_Detours);
+
+void __fastcall DoneHotbar(oCGame* game, void* edx) {
+    hotbar.reset();
+    functionHeld.fill(false);
+    DoneHotbarHook(game, edx);
 }
 
 void __fastcall CloseInventory(oCNpcInventory*, void*);
@@ -999,6 +1107,7 @@ auto PollHook = Union::CreateHook(
     reinterpret_cast<void*>(0x007A55C0), &PollInventory, Union::HookType::Hook_Detours);
 
 void __cdecl PollInventory() {
+    for (int i = 0; i < HotbarSlots; ++i) if (!(GetAsyncKeyState(VK_F1 + i) & 0x8000)) functionHeld[i] = false;
     PollHook();
     if (auto* dialog = ActiveTrade()) {
         if (!session || session->dialog != dialog) {
