@@ -491,6 +491,7 @@ class InventoryPanel {
         quantityText.DrawItems();
     }
 
+public:
     void DrawCursor(std::optional<POINT> point) {
         if (!point || !cursor.backTex) return;
         CURSORINFO info{};
@@ -504,7 +505,6 @@ class InventoryPanel {
         zrenderer->SetAlphaBlendSource(alpha);
     }
 
-public:
     InventoryPanel() {
         InitSprite(panel, "G2NRI_PANEL.TGA", 248);
         InitSprite(solid, "G2NRI_SOLID.TGA");
@@ -789,7 +789,6 @@ public:
         if (quantity) DrawQuantity(point);
         else if (dragging) DrawTooltip(nullptr, 0, std::nullopt);
         else DrawTooltip(Item(hover), Amount(hover), point);
-        DrawCursor(point);
     }
 };
 
@@ -885,8 +884,7 @@ public:
         if (!IsDragging()) return nullptr;
         for (auto* node = inv.inventory.GetNextInList(); node; node = node->GetNextInList()) {
             auto* item = node->GetData();
-            if (item == pressedItem->item && item->GetInstance() == pressedItem->instance
-                && item->amount > 0 && ActionFor(*item) != HotbarAction::None) return item;
+            if (item == pressedItem->item && item->GetInstance() == pressedItem->instance && item->amount > 0) return item;
         }
         return nullptr;
     }
@@ -972,6 +970,11 @@ std::unique_ptr<InventorySession> session;
 std::unique_ptr<HotbarPanel> hotbar;
 std::array<bool, HotbarSlots> functionHeld{};
 
+HotbarPanel& GetHotbar() {
+    if (!hotbar) hotbar = std::make_unique<HotbarPanel>();
+    return *hotbar;
+}
+
 int __fastcall InventoryKey(oCNpcInventory*, void*, int);
 auto KeyHook = Union::CreateHook(
     SIGNATURE_OF(&oCNpcInventory::HandleEvent), &InventoryKey, Union::HookType::Hook_Detours);
@@ -1051,25 +1054,27 @@ void __fastcall DrawInventory(oCItemContainer* container, void* edx) {
         }
     }
     if (session && !session->dialog && PersonalInventory(container)) {
-        session->panel.Draw(player->inventory2, session->Position(), session->IsDragging());
+        auto& inv = player->inventory2;
+        const auto point = session->Position();
+        session->panel.Draw(inv, point, session->IsDragging());
+        // The renderer can wrap and batch the native container pass. Draw the
+        // editable bar here so its previews stay in the same pass as the grid.
+        GetHotbar().Draw(inv, true, point, session->DraggedItem(inv));
+        session->panel.DrawCursor(point);
     } else {
         DrawHook(container, edx);
     }
 }
 
-void __cdecl DrawHotbar();
-auto DrawContainersHook = Union::CreateHook(
-    SIGNATURE_OF(&oCItemContainer::Container_Draw), &DrawHotbar, Union::HookType::Hook_Detours);
+void __fastcall DrawHotbarHud(oCGame*, void*);
+auto DrawHudHook = Union::CreateHook(
+    SIGNATURE_OF(&oCGame::UpdatePlayerStatus), &DrawHotbarHud, Union::HookType::Hook_Detours);
 
-void __cdecl DrawHotbar() {
-    DrawContainersHook();
-    if (!player || !zrenderer) return;
-    auto& inv = player->inventory2;
-    const bool editing = session && !session->dialog && PersonalInventory(&inv);
-    if (!editing && (!history.HasHotbar() || !HotbarInWorld())) return;
-    if (!hotbar) hotbar = std::make_unique<HotbarPanel>();
-    hotbar->Draw(inv, editing, editing ? session->Position() : std::nullopt,
-                 editing ? session->DraggedItem(inv) : nullptr);
+void __fastcall DrawHotbarHud(oCGame* game, void* edx) {
+    DrawHudHook(game, edx);
+    if (game == ogame && zrenderer && HotbarInWorld()) {
+        GetHotbar().Draw(player->inventory2, false, std::nullopt, nullptr);
+    }
 }
 
 int __fastcall HotbarKey(oCGame*, void*, int);

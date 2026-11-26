@@ -42,6 +42,7 @@ bool HotbarInWorld() {
     if (!ogame || !player || !player->GetHomeWorld() || !screen || !screen->GetFont()
         || screen->psizex < 480 || screen->psizey < 360 || ogame->inLoadSaveGame
         || ogame->IsOnPause() || !ogame->GetShowPlayerStatus() || zCMenu::GetActive() || player->IsDead()
+        || player->inventory2.IsOpen()
         || player->IsInGlobalCutscene() || !oCInformationManager::GetInformationManager().HasFinished()) return false;
     for (auto* node = oCItemContainer::contList.GetNextInList(); node; node = node->GetNextInList()) {
         auto* container = node->GetData();
@@ -106,9 +107,13 @@ class HotbarPanel {
         text.CreateText(text.anx(x + 1), text.any(y + 1), value, 0, shadow, FALSE, TRUE);
     }
 
-    void Render(oCItem& item, zCWorld& renderWorld, Box box) {
+    void Render(oCItem& item, oCNpcInventory& inv, Box box) {
+        if (!inv.rndWorld && !world) {
+            world = new zCWorld();
+            world->m_bIsInventoryWorld = TRUE;
+        }
         Place(preview, box);
-        item.RenderItem(&renderWorld, &preview, 0.0f);
+        item.RenderItem(inv.rndWorld ? inv.rndWorld : world, &preview, 0.0f);
     }
 
 public:
@@ -131,15 +136,6 @@ public:
         }
         std::array<HotbarStock, HotbarSlots> stock{};
         for (int i = 0; i < HotbarSlots; ++i) stock[i] = StockFor(inv, bindings[i]);
-        auto* renderWorld = inv.rndWorld;
-        if (!renderWorld) {
-            if (!world) {
-                world = new zCWorld();
-                world->m_bIsInventoryWorld = TRUE;
-            }
-            renderWorld = world;
-        }
-
         const auto layout = InventoryLayout::PlaceHotbar(screen->psizex, screen->psizey);
         const auto hover = point ? layout.Hit(point->x, point->y) : -1;
         Place(panel, layout.bounds);
@@ -161,7 +157,7 @@ public:
         for (int i = 0; i < HotbarSlots; ++i) {
             const auto cell = layout.Cell(i);
             if (stock[i].item) {
-                Render(*stock[i].item, *renderWorld, {cell.x + 6, cell.y + 8, cell.width - 12, cell.height - 12});
+                Render(*stock[i].item, inv, {cell.x + 6, cell.y + 8, cell.width - 12, cell.height - 12});
             }
             const bool missing = bindings[i] >= 0 && !stock[i].item;
             Text(cell, "F" + std::to_string(i + 1), i == hover ? Bright : missing ? Missing : Bronze);
@@ -176,7 +172,7 @@ public:
             Fill({x, y, size, size}, Bronze);
             Fill({x + 1, y + 1, size - 2, size - 2}, 0xED202318);
             zrenderer->SetAlphaBlendSource(alpha);
-            Render(*dragged, *renderWorld, {x + 4, y + 4, size - 8, size - 8});
+            Render(*dragged, inv, {x + 4, y + 4, size - 8, size - 8});
         }
         oCItem::SetLightingSwell(TRUE);
     }
