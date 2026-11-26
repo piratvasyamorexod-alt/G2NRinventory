@@ -1,9 +1,12 @@
 #pragma once
 
 #include "inventory_layout.hpp"
+#include "inventory_history.hpp"
 #include "mouse_win32.hpp"
 
 #include <array>
+#include <filesystem>
+#include <fstream>
 #include <iterator>
 #include <memory>
 #include <string>
@@ -25,6 +28,8 @@ constexpr unsigned long Equipped = 0xFFB7C98E;
 constexpr unsigned long Missing = 0xFFFFB797;
 constexpr int CategoryCount = static_cast<int>(Category::Count);
 
+#include "inventory_tracking.ipp"
+
 Category Classify(const oCItem& item) {
     if (item.flags & ITM_FLAG_SHIELD) return Category::Armor;
     if (item.mainflag & (ITM_CAT_NF | ITM_CAT_FF)) return Category::Weapons;
@@ -34,6 +39,18 @@ Category Classify(const oCItem& item) {
     if (item.mainflag & (ITM_CAT_FOOD | ITM_CAT_POTION)) return Category::Supplies;
     if (item.mainflag & ITM_CAT_DOCS) return Category::Documents;
     return Category::Other;
+}
+
+bool MissingRequirements(const oCItem& item) {
+    constexpr auto equipment = ITM_CAT_NF | ITM_CAT_FF | ITM_CAT_ARMOR | ITM_CAT_RUNE;
+    constexpr auto accessories = ITM_FLAG_SHIELD | ITM_FLAG_RING | ITM_FLAG_AMULET | ITM_FLAG_BELT;
+    if ((item.flags & ITM_FLAG_ACTIVE) || !(item.mainflag & equipment || item.flags & accessories)) return false;
+    if (item.mag_circle > 0 && player->GetTalentSkill(oCNpcTalent::NPC_TAL_MAGE) < item.mag_circle) return true;
+    for (int i = 0; i < ITM_COND_MAX; ++i) {
+        const int attribute = item.cond_atr[i];
+        if (attribute > 0 && attribute < NPC_ATR_MAX && player->GetAttribute(attribute) < item.cond_value[i]) return true;
+    }
+    return false;
 }
 
 int WeaponDamage(oCItem& item) {
@@ -84,7 +101,7 @@ constexpr std::array<DamageLabel, NPC_ATR_MAX> AttributeLabels{{
     {L"Регенерация маны", "Mana regeneration"}
 }};
 constexpr std::array<DamageLabel, CategoryCount> CategoryLabels{{
-    {L"Все", "All"}, {L"Оружие", "Weapons"}, {L"Броня", "Armor"}, {L"Снаряды", "Ammo"},
+    {L"Последнее", "Recent"}, {L"Все", "All"}, {L"Оружие", "Weapons"}, {L"Броня", "Armor"}, {L"Снаряды", "Ammo"},
     {L"Магия", "Magic"}, {L"Припасы", "Supplies"}, {L"Записи", "Notes"}, {L"Разное", "Other"}
 }};
 
@@ -97,19 +114,19 @@ class InventoryPanel {
     zCView solid{0, 0, 8, 8};
     zCView preview{0, 0, 8, 8};
     zCView cursor{0, 0, 8, 8};
+    zCView lockedMarker{0, 0, 8, 8};
+    zCView unreadMarker{0, 0, 8, 8};
+    zCView equippedMarker{0, 0, 8, 8};
     Box bounds, close, tabs, listBar;
     Grid grid;
     std::vector<Entry> entries;
     std::vector<oCItem*> nativeItems;
     std::array<int, CategoryCount> counts{};
-    Category category = Category::All;
+    Category category = Category::Recent;
     int inset = 0, lineHeight = 0, firstRow = 0;
     int selected = -1;
     oCItem* selectedItem = nullptr;
     int selectedInstance = -1;
-    oCItem* lastClicked = nullptr;
-    int lastInstance = -1;
-    ULONGLONG lastClickAt = 0;
     oCItem* tooltipItem = nullptr;
     int tooltipInstance = -1, tooltipTop = 0, tooltipMaxTop = 0;
     bool useSelection = false, cyrillic = true;
@@ -166,9 +183,20 @@ class InventoryPanel {
         Fill({box.Right() - 1, box.y + 1, 1, box.height - 2}, color);
     }
 
+    void DrawMarker(zCView& sprite, int x, int y, int size) {
+        if (!sprite.backTex) return;
+        Place(sprite, {x, y, size, size});
+        sprite.Blit();
+    }
+
     Box Tab(int index) const {
-        const int left = tabs.x + index * tabs.width / CategoryCount;
-        return {left, tabs.y, tabs.x + (index + 1) * tabs.width / CategoryCount - left, tabs.height};
+        constexpr int firstRowTabs = 5;
+        const bool lower = index >= firstRowTabs;
+        const int rowCount = lower ? CategoryCount - firstRowTabs : firstRowTabs;
+        const int column = lower ? index - firstRowTabs : index;
+        const int height = tabs.height / 2;
+        const int left = tabs.x + column * tabs.width / rowCount;
+        return {left, tabs.y + (lower ? height : 0), tabs.x + (column + 1) * tabs.width / rowCount - left, height};
     }
 
     void ScrollBar(Box bar, int visible, int count, int top) {
@@ -238,6 +266,9 @@ class InventoryPanel {
         if (item.flags & ITM_FLAG_ACTIVE) {
             wrap(Label(L"Экипировано", "Equipped"), Equipped);
         }
+        if (ReadableDocument(item) && !history.WasRead(item.GetInstance())) {
+            wrap(Label(L"Не прочитано", "Unread"), Bronze);
+        }
         const bool weapon = Classify(item) == Category::Weapons;
         const int damage = weapon ? WeaponDamage(item) : 0;
         if (weapon) {
@@ -264,13 +295,16 @@ class InventoryPanel {
         }
         for (int i = 0; i < ITM_COND_MAX; ++i) {
             const int attribute = item.cond_atr[i], required = item.cond_value[i];
-            if (required <= 0 || attribute < 0 || attribute >= NPC_ATR_MAX) continue;
+            if (required <= 0 || attribute <= 0 || attribute >= NPC_ATR_MAX) continue;
             const auto& label = AttributeLabels[attribute];
             const int current = player->GetAttribute(attribute);
             wrap(Label(L"Требуется", "Requires") + "  " + Label(label.ru, label.en) + " " + std::to_string(required),
                  current < required ? Missing : Paper);
         }
-        if (item.mag_circle > 0) add(L"Круг магии", "Circle of magic", item.mag_circle);
+        if (item.mag_circle > 0) {
+            const int circle = player->GetTalentSkill(oCNpcTalent::NPC_TAL_MAGE);
+            add(L"Круг магии", "Circle of magic", item.mag_circle, circle < item.mag_circle ? Missing : Paper);
+        }
         for (int i = 0; i < ITM_COND_MAX; ++i) {
             const int attribute = item.change_atr[i], change = item.change_value[i];
             if (!change || attribute < 0 || attribute >= NPC_ATR_MAX) continue;
@@ -356,6 +390,9 @@ public:
         InitSprite(panel, "G2NRI_PANEL.TGA", 248);
         InitSprite(solid, "G2NRI_SOLID.TGA");
         InitSprite(cursor, "G2NRI_CURSOR.TGA");
+        InitSprite(lockedMarker, "G2NRI_LOCKED.TGA");
+        InitSprite(unreadMarker, "G2NRI_UNREAD.TGA");
+        InitSprite(equippedMarker, "G2NRI_EQUIPPED.TGA");
     }
 
     bool Ready() const { return panel.backTex && solid.backTex; }
@@ -375,24 +412,28 @@ public:
         panel.SetFont(screen->GetFont());
         textView.SetFont(screen->GetFont());
         tooltipText.SetFont(screen->GetFont());
-        inset = std::clamp(screen->psizey / 48, 10, 26);
+        inset = std::clamp(screen->psizey / 80, 8, 20);
         lineHeight = (std::max)(12, panel.GetFont()->GetFontY()) + 4;
-        const int w = (std::min)(screen->psizex * 92 / 100, (std::max)(460, screen->psizey * 91 / 100));
-        const int bodyTop = inset + 2 * lineHeight + 18;
-        const int footerSpace = inset + lineHeight + 13;
+        const int margin = std::clamp(screen->psizex / 72, 10, 36);
+        const int target = std::clamp(screen->psizey / 14, 42, 128);
+        const int gap = std::clamp(screen->psizey / 360, 2, 5);
         const int scrollWidth = (std::max)(8, inset / 2);
+        const int width = (std::max)(430, 7 * (target + gap) - gap + 2 * inset + scrollWidth);
+        const int w = (std::min)(screen->psizex - 2 * margin, width);
+        const int tabHeight = lineHeight + 5;
+        const int bodyTop = inset + lineHeight + 4 + 2 * tabHeight + 7;
+        const int footerSpace = inset + lineHeight + 11;
         grid = InventoryLayout::MakeGrid({inset, bodyTop, w - 2 * inset - scrollWidth,
-                                          screen->psizey * 78 / 100 - bodyTop - footerSpace},
-                                          std::clamp(screen->psizey / 10, 52, 128), 4);
+                                          screen->psizey * 77 / 100 - bodyTop - footerSpace}, target, gap);
         const int h = grid.area.Bottom() + footerSpace;
-        bounds = {(screen->psizex - w) / 2, (screen->psizey - h) / 2, w, h};
+        bounds = InventoryLayout::PlacePanel(screen->psizex, screen->psizey, w, h, margin);
         Place(panel, bounds);
         Place(textView, bounds);
         grid.area.x += bounds.x;
         grid.area.y += bounds.y;
         const int top = bounds.y + inset;
         close = {bounds.Right() - inset - Width("Esc") - 8, top, Width("Esc") + 8, lineHeight};
-        tabs = {bounds.x + inset, top + lineHeight + 4, w - 2 * inset, lineHeight + 5};
+        tabs = {bounds.x + inset, top + lineHeight + 4, w - 2 * inset, 2 * tabHeight};
         listBar = {grid.area.Right(), grid.area.y, scrollWidth, grid.area.height};
     }
 
@@ -400,6 +441,7 @@ public:
         nativeItems.clear();
         entries.clear();
         counts.fill(0);
+        std::array<bool, InventoryHistory::History::MaximumRecent> recentSeen{};
         bool foundCyrillic = false;
         for (auto* node = inv.contents->GetNextInList(); node; node = node->GetNextInList()) {
             auto* item = node->GetData();
@@ -407,18 +449,21 @@ public:
             nativeItems.push_back(item);
             if (!item || item->amount <= 0) continue;
             const auto categoryOfItem = Classify(*item);
+            const int rank = history.Rank(item->GetInstance());
+            const bool recent = rank >= 0 && !std::exchange(recentSeen[rank], true);
+            if (recent) ++counts[static_cast<int>(Category::Recent)];
             ++counts[static_cast<int>(Category::All)];
             ++counts[static_cast<int>(categoryOfItem)];
             if (!foundCyrillic) {
                 const std::string_view name(item->name.ToChar());
                 foundCyrillic = std::any_of(name.begin(), name.end(), [](unsigned char c) { return c >= 0xC0; });
             }
-            if (category == Category::All || category == categoryOfItem) {
-                entries.push_back({index, categoryOfItem, categoryOfItem == Category::Weapons ? WeaponDamage(*item) : 0});
+            if (category == Category::All || category == categoryOfItem || (category == Category::Recent && recent)) {
+                entries.push_back({index, categoryOfItem, categoryOfItem == Category::Weapons ? WeaponDamage(*item) : 0, rank});
             }
         }
         if (!nativeItems.empty()) cyrillic = foundCyrillic;
-        InventoryLayout::Sort(entries);
+        InventoryLayout::Sort(entries, category);
         firstRow = std::clamp(firstRow, 0, grid.LastRow(static_cast<int>(entries.size())));
         int match = -1;
         if (selectedItem) {
@@ -437,13 +482,12 @@ public:
         category = static_cast<Category>(next);
         firstRow = tooltipTop = 0;
         selected = -1;
-        selectedItem = lastClicked = nullptr;
+        selectedItem = nullptr;
         useSelection = true;
         Refresh(inv);
     }
 
     void MoveSelection(int dx, int dy, oCNpcInventory& inv) {
-        lastClicked = nullptr;
         useSelection = true;
         SetSelection((std::max)(0, selected) + dx + dy * grid.columns, true);
         SelectNative(inv);
@@ -451,7 +495,6 @@ public:
 
     void Scroll(POINT p, int wheel) {
         if (!wheel || !bounds.Hit(p.x, p.y)) return;
-        lastClicked = nullptr;
         if (tooltipMaxTop > 0 && (GetKeyState(VK_SHIFT) & 0x8000)) {
             auto* item = Item(ItemAt(p));
             if (item && item == tooltipItem && item->GetInstance() == tooltipInstance) {
@@ -472,25 +515,13 @@ public:
         if (listBar.Hit(p.x, p.y)) {
             const int last = grid.LastRow(static_cast<int>(entries.size()));
             if (last > 0) firstRow = std::clamp(MulDiv(p.y - listBar.y, last, (std::max)(1, listBar.height - 1)), 0, last);
-            lastClicked = nullptr;
             return Command::None;
         }
         const int index = ItemAt(p);
-        auto* clicked = Item(index);
-        if (!clicked) {
-            lastClicked = nullptr;
-            return Command::None;
-        }
+        if (!Item(index)) return Command::None;
         useSelection = true;
         SetSelection(index, false);
-        SelectNative(inv);
-        const auto time = GetTickCount64();
-        const int instance = clicked->GetInstance();
-        const bool twice = clicked == lastClicked && instance == lastInstance && time - lastClickAt <= GetDoubleClickTime();
-        lastClicked = twice ? nullptr : clicked;
-        lastInstance = instance;
-        lastClickAt = time;
-        return twice ? Command::Use : Command::None;
+        return Command::Use;
     }
 
     void Draw(oCNpcInventory& inv, std::optional<POINT> point) {
@@ -516,7 +547,10 @@ public:
             if (active) Fill({cell.x + 5, cell.Bottom() - 2, cell.width - 10, 2}, Bronze);
         }
         if (entries.empty()) {
-            Text(grid.area.x, grid.area.y, Label(L"Здесь пока пусто", "No items in this category"), grid.area.width, Bronze);
+            const auto message = category == Category::Recent
+                ? Label(L"Здесь появятся полученные предметы", "Newly acquired items will appear here")
+                : Label(L"Здесь пока пусто", "No items in this category");
+            Text(grid.area.x + 5, grid.area.y + 6, message, grid.area.width - 10, Bronze);
         }
         const int first = firstRow * grid.columns, slots = grid.columns * grid.rows;
         for (int slot = 0; slot < slots; ++slot) {
@@ -527,7 +561,6 @@ public:
             Fill(cell, equipped ? 0xFF292D1E : 0xFF1D2018);
             Frame(cell, index == hover ? Bright : index == selected && useSelection ? Bronze : Rule);
             if (!item) continue;
-            if (equipped) Fill({cell.x + 3, cell.y + 3, 5, 5}, Equipped);
             if (item->amount > 1) {
                 Text(cell.x + 3, cell.Bottom() - lineHeight, std::to_string(item->amount), cell.width - 7, Bright, true);
             }
@@ -535,8 +568,8 @@ public:
         ScrollBar(listBar, grid.rows, (static_cast<int>(entries.size()) + grid.columns - 1) / grid.columns, firstRow);
         const int footer = bounds.Bottom() - inset - lineHeight;
         Fill({left, footer - 5, tabs.width, 1}, Rule);
-        Text(left, footer, Label(L"ЛКМ  Выбрать     Двойной клик / Enter  Использовать     Tab  Категория",
-                                 "Click  Select     Double-click / Enter  Use     Tab  Category"), tabs.width, Bronze);
+        Text(left, footer, Label(L"ЛКМ / Enter  Использовать    Tab  Вкладка",
+                                 "Click / Enter  Use    Tab  Category"), tabs.width, Bronze);
         zrenderer->SetAlphaBlendSource(previousAlpha);
 
         oCItem::SetLightingSwell(FALSE);
@@ -553,6 +586,19 @@ public:
             }
         }
         oCItem::SetLightingSwell(TRUE);
+        zrenderer->SetAlphaBlendSource(zRND_ALPHA_SOURCE_MATERIAL);
+        const int marker = std::clamp(grid.size / 3, 13, 24);
+        for (int slot = 0; slot < slots; ++slot) {
+            auto* item = Item(first + slot);
+            if (!item) continue;
+            const auto cell = grid.Cell(slot);
+            if (item->flags & ITM_FLAG_ACTIVE) DrawMarker(equippedMarker, cell.x + 2, cell.y + 2, marker);
+            if (MissingRequirements(*item)) DrawMarker(lockedMarker, cell.Right() - marker - 2, cell.y + 2, marker);
+            else if (ReadableDocument(*item) && !history.WasRead(item->GetInstance())) {
+                DrawMarker(unreadMarker, cell.Right() - marker - 2, cell.y + 2, marker);
+            }
+        }
+        zrenderer->SetAlphaBlendSource(previousAlpha);
         textView.DrawItems();
         DrawTooltip(Item(hover), point);
         if (point && cursor.backTex) {
@@ -597,10 +643,12 @@ class InventorySession {
     }
 
     std::optional<POINT> ClickPoint(std::optional<POINT> event, int button, bool& held) const {
+        // Use one input path for the press. Sampling a press that already arrived via the hook can fire it twice.
+        if (listening) return ScreenPoint(event);
         const bool down = (GetAsyncKeyState(button) & 0x8000) != 0;
         const bool edge = down && !held;
         held = down;
-        return event ? ScreenPoint(event) : edge ? Position() : std::nullopt;
+        return edge ? Position() : std::nullopt;
     }
 
 public:

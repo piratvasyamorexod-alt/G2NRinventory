@@ -5,7 +5,7 @@
 
 namespace InventoryLayout {
 
-enum class Category { All, Weapons, Armor, Ammo, Magic, Supplies, Documents, Other, Count };
+enum class Category { Recent, All, Weapons, Armor, Ammo, Magic, Supplies, Documents, Other, Count };
 
 struct Box {
     int x = 0, y = 0, width = 0, height = 0;
@@ -18,9 +18,16 @@ struct Entry {
     int nativeIndex;
     Category category;
     int damage;
+    int recentRank = -1;
 };
 
-inline void Sort(std::vector<Entry>& entries) {
+inline void Sort(std::vector<Entry>& entries, Category category = Category::All) {
+    if (category == Category::Recent) {
+        std::stable_sort(entries.begin(), entries.end(), [](const Entry& a, const Entry& b) {
+            return a.recentRank < b.recentRank;
+        });
+        return;
+    }
     std::stable_sort(entries.begin(), entries.end(), [](const Entry& a, const Entry& b) {
         if (a.category != b.category) return a.category < b.category;
         return a.category == Category::Weapons && a.damage > b.damage;
@@ -55,6 +62,10 @@ inline Grid MakeGrid(Box available, int target, int gap) {
     const int rows = (std::max)(1, (available.height + gap) / (size + gap));
     return {{available.x, available.y, columns * (size + gap) - gap, rows * (size + gap) - gap},
             columns, rows, gap, size};
+}
+
+inline Box PlacePanel(int screenWidth, int screenHeight, int width, int height, int margin) {
+    return {screenWidth - width - margin, (screenHeight - height) / 2, width, height};
 }
 
 inline Box PlaceTooltip(Box viewport, int x, int y, int width, int height, int gap) {
