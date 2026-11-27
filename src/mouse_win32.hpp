@@ -2,10 +2,8 @@
 
 #include <Windows.h>
 #include <commctrl.h>
-#include <future>
-#include <mutex>
+#include <array>
 #include <optional>
-#include <thread>
 #include <utility>
 
 #pragma comment(lib, "comctl32.lib")
@@ -38,15 +36,12 @@ public:
     };
 
 private:
-    static inline thread_local MouseEvents* activeListener = nullptr;
-    static inline MouseEvents* activeWindow = nullptr;
+    static inline thread_local MouseEvents* activeWindow = nullptr;
     HWND window = nullptr;
-    HHOOK windowHook = nullptr;
-    std::thread listener;
-    DWORD listenerId = 0;
-    mutable std::mutex inputMutex;
+    HHOOK mouseHook = nullptr, windowHook = nullptr;
     bool lostFocus = false;
-    bool lowLevelLeft = false, lowLevelRelease = false, lowLevelRight = false, lowLevelWheel = false;
+    struct MouseEvent { POINT at; DWORD time; int delta; };
+    std::array<std::optional<MouseEvent>, 4> lastLowLevel;
     State pending;
     int wheelDelta = 0;
 
@@ -54,42 +49,42 @@ private:
         return message == WM_LBUTTONDOWN || message == WM_LBUTTONUP || message == WM_RBUTTONDOWN || message == WM_MOUSEWHEEL;
     }
 
-    void Record(UINT message, POINT at, int delta, bool lowLevel) {
+    void Record(UINT message, POINT at, int delta, DWORD time, bool lowLevel) {
+        const int index = message == WM_LBUTTONDOWN ? 0 : message == WM_LBUTTONUP ? 1 : message == WM_RBUTTONDOWN ? 2 : 3;
+        auto& previous = lastLowLevel[index];
+        if (lowLevel) {
+            previous = MouseEvent{at, time, delta};
+        } else if (previous && previous->at.x == at.x && previous->at.y == at.y && previous->delta == delta
+                   && (time - previous->time <= 25 || previous->time - time <= 25)) {
+            previous.reset();
+            return;
+        }
         switch (message) {
         case WM_LBUTTONDOWN:
-            if (lowLevel || !lowLevelLeft) {
-                pending.leftClick = at;
-                pending.leftRelease.reset();
-                pending.leftShift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
-            }
-            lowLevelLeft |= lowLevel;
+            pending.leftClick = at;
+            pending.leftRelease.reset();
+            pending.leftShift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
             break;
         case WM_LBUTTONUP:
-            if (lowLevel || !lowLevelRelease) pending.leftRelease = at;
-            lowLevelRelease |= lowLevel;
+            pending.leftRelease = at;
             break;
         case WM_RBUTTONDOWN:
-            if (lowLevel || !lowLevelRight) pending.rightClick = at;
-            lowLevelRight |= lowLevel;
+            pending.rightClick = at;
             break;
         case WM_MOUSEWHEEL:
-            if (lowLevel || !lowLevelWheel) {
-                pending.wheelPosition = at;
-                wheelDelta += delta;
-            }
-            lowLevelWheel |= lowLevel;
+            pending.wheelPosition = at;
+            wheelDelta += delta;
             break;
         }
     }
 
     static LRESULT CALLBACK Observe(int code, WPARAM message, LPARAM data) {
-        if (code == HC_ACTION && activeListener && HasFocus(activeListener->window)
+        if (code == HC_ACTION && activeWindow && HasFocus(activeWindow->window)
             && IsMouseAction(static_cast<UINT>(message))) {
-            auto& mouse = *activeListener;
+            auto& mouse = *activeWindow;
             const auto& input = *reinterpret_cast<const MSLLHOOKSTRUCT*>(data);
-            std::lock_guard lock(mouse.inputMutex);
             mouse.Record(static_cast<UINT>(message), input.pt,
-                         static_cast<short>(HIWORD(input.mouseData)), true);
+                         static_cast<short>(HIWORD(input.mouseData)), input.time, true);
         }
         return CallNextHookEx(nullptr, code, message, data);
     }
@@ -101,7 +96,6 @@ private:
             if (message.hwnd == mouse.window) {
                 if ((message.message == WM_ACTIVATEAPP && !message.wParam)
                     || (message.message == WM_ACTIVATE && LOWORD(message.wParam) == WA_INACTIVE)) {
-                    std::lock_guard lock(mouse.inputMutex);
                     mouse.lostFocus = true;
                     mouse.ClearPending();
                 } else if (IsMouseAction(message.message) && HasFocus(mouse.window)) {
@@ -111,34 +105,18 @@ private:
                     if (message.message != WM_MOUSEWHEEL && !ClientToScreen(message.hwnd, &at)) {
                         return CallNextHookEx(nullptr, code, sent, data);
                     }
-                    std::lock_guard lock(mouse.inputMutex);
-                    mouse.Record(message.message, at, GET_WHEEL_DELTA_WPARAM(message.wParam), false);
+                    const int delta = message.message == WM_MOUSEWHEEL ? GET_WHEEL_DELTA_WPARAM(message.wParam) : 0;
+                    mouse.Record(message.message, at, delta, static_cast<DWORD>(GetMessageTime()), false);
                 }
             }
         }
         return CallNextHookEx(nullptr, code, sent, data);
     }
 
-    void Listen(std::promise<bool> ready, HMODULE module) {
-        MSG message{};
-        // Create the thread's queue before Start returns. The game thread can now
-        // pace its frames without delaying Windows' low-level mouse callback.
-        PeekMessageW(&message, nullptr, WM_USER, WM_USER, PM_NOREMOVE);
-        listenerId = GetCurrentThreadId();
-        activeListener = this;
-        const auto hook = SetWindowsHookExW(WH_MOUSE_LL, Observe, module, 0);
-        ready.set_value(hook != nullptr);
-        if (!hook) return;
-        while (GetMessageW(&message, nullptr, 0, 0) > 0) {
-            DispatchMessageW(&message);
-        }
-        UnhookWindowsHookEx(hook);
-    }
-
     void ClearPending() {
         pending = {};
         wheelDelta = 0;
-        lowLevelLeft = lowLevelRelease = lowLevelRight = lowLevelWheel = false;
+        lastLowLevel = {};
     }
 
 public:
@@ -148,56 +126,40 @@ public:
     ~MouseEvents() { Stop(); }
 
     bool Start(HWND game) {
-        if (!game || activeWindow || listener.joinable()) return false;
-        HMODULE module = nullptr;
-        if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                                reinterpret_cast<LPCWSTR>(&Observe), &module)) return false;
+        if (!game || activeWindow) return false;
         window = game;
-        std::promise<bool> ready;
-        auto installed = ready.get_future();
-        try {
-            listener = std::thread(&MouseEvents::Listen, this, std::move(ready), module);
-        } catch (const std::system_error&) {
-            return false;
+        // Windows dispatches low-level events on the installing thread. The
+        // game already pumps this queue, so no worker has to exit with the DLL.
+        HMODULE module = nullptr;
+        if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               reinterpret_cast<LPCWSTR>(&Observe), &module)) {
+            mouseHook = SetWindowsHookExW(WH_MOUSE_LL, Observe, module, 0);
         }
-        if (!installed.get()) listener.join();
         if (GetWindowThreadProcessId(window, nullptr) == GetCurrentThreadId()) {
             windowHook = SetWindowsHookExW(WH_CALLWNDPROC, ObserveWindow, nullptr, GetCurrentThreadId());
         }
-        if (!listener.joinable() && !windowHook) return false;
+        if (!mouseHook && !windowHook) return false;
         activeWindow = this;
         return true;
     }
 
     void Stop() {
         if (activeWindow == this) activeWindow = nullptr;
+        if (mouseHook) UnhookWindowsHookEx(std::exchange(mouseHook, nullptr));
         if (windowHook) UnhookWindowsHookEx(std::exchange(windowHook, nullptr));
-        if (listener.joinable()) {
-            PostThreadMessageW(listenerId, WM_QUIT, 0, 0);
-            // A later hook in the chain may belong to this thread.
-            const HANDLE worker = listener.native_handle();
-            while (MsgWaitForMultipleObjects(1, &worker, FALSE, INFINITE, QS_SENDMESSAGE) == WAIT_OBJECT_0 + 1) {
-                MSG message{};
-                PeekMessageW(&message, nullptr, 0, 0, PM_NOREMOVE | PM_QS_SENDMESSAGE);
-            }
-            listener.join();
-        }
         Discard();
         lostFocus = false;
     }
 
     void Discard() {
-        std::lock_guard lock(inputMutex);
         ClearPending();
     }
 
     bool TakeFocusLoss() {
-        std::lock_guard lock(inputMutex);
         return std::exchange(lostFocus, false);
     }
 
     State Take() {
-        std::lock_guard lock(inputMutex);
         pending.wheel = wheelDelta / WHEEL_DELTA;
         wheelDelta -= pending.wheel * WHEEL_DELTA;
         return std::exchange(pending, State{});

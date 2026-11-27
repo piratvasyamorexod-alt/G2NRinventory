@@ -966,13 +966,26 @@ public:
     }
 };
 
-std::unique_ptr<InventorySession> session;
-std::unique_ptr<HotbarPanel> hotbar;
+// Release engine objects on the game thread, before the renderer and input
+// are destroyed. DLL static destructors can run after both are gone.
+InventorySession* session = nullptr;
+HotbarPanel* hotbar = nullptr;
+bool shuttingDown = false;
 std::array<bool, HotbarSlots> functionHeld{};
 
+void CloseSession() {
+    delete std::exchange(session, nullptr);
+}
+
 HotbarPanel& GetHotbar() {
-    if (!hotbar) hotbar = std::make_unique<HotbarPanel>();
+    if (!hotbar) hotbar = new HotbarPanel();
     return *hotbar;
+}
+
+void ReleaseInventoryUi() {
+    CloseSession();
+    delete std::exchange(hotbar, nullptr);
+    functionHeld.fill(false);
 }
 
 int __fastcall InventoryKey(oCNpcInventory*, void*, int);
@@ -1072,7 +1085,7 @@ auto DrawHudHook = Union::CreateHook(
 
 void __fastcall DrawHotbarHud(oCGame* game, void* edx) {
     DrawHudHook(game, edx);
-    if (game == ogame && zrenderer && HotbarInWorld()) {
+    if (!shuttingDown && game == ogame && zrenderer && HotbarInWorld()) {
         GetHotbar().Draw(player->inventory2, false, std::nullopt, nullptr);
     }
 }
@@ -1082,7 +1095,7 @@ auto HotbarKeyHook = Union::CreateHook(
     SIGNATURE_OF(&oCGame::HandleEvent), &HotbarKey, Union::HookType::Hook_Detours);
 
 int __fastcall HotbarKey(oCGame* game, void* edx, int key) {
-    if (key < KEY_F1 || key > KEY_F10 || game != ogame || history.Hotbar()[key - KEY_F1] < 0
+    if (shuttingDown || key < KEY_F1 || key > KEY_F10 || game != ogame || history.Hotbar()[key - KEY_F1] < 0
         || ((GetAsyncKeyState(VK_MENU) | GetAsyncKeyState(VK_CONTROL) | GetAsyncKeyState(VK_SHIFT)) & 0x8000)
         || !InventoryMouse::HasFocus(hWndApp) || !HotbarInWorld()) return HotbarKeyHook(game, edx, key);
     const int slot = key - KEY_F1;
@@ -1096,9 +1109,18 @@ auto DoneHotbarHook = Union::CreateHook(
     SIGNATURE_OF(&oCGame::Done), &DoneHotbar, Union::HookType::Hook_Detours);
 
 void __fastcall DoneHotbar(oCGame* game, void* edx) {
-    hotbar.reset();
-    functionHeld.fill(false);
+    if (game == ogame) ReleaseInventoryUi();
     DoneHotbarHook(game, edx);
+}
+
+void __fastcall StopInventory(CGameManager*, void*);
+auto StopInventoryHook = Union::CreateHook(
+    SIGNATURE_OF(&CGameManager::Done), &StopInventory, Union::HookType::Hook_Detours);
+
+void __fastcall StopInventory(CGameManager* manager, void* edx) {
+    shuttingDown = true;
+    ReleaseInventoryUi();
+    StopInventoryHook(manager, edx);
 }
 
 void __fastcall CloseInventory(oCNpcInventory*, void*);
@@ -1106,7 +1128,7 @@ auto CloseHook = Union::CreateHook(
     SIGNATURE_OF(&oCNpcInventory::Close), &CloseInventory, Union::HookType::Hook_Detours);
 
 void __fastcall CloseInventory(oCNpcInventory* inv, void* edx) {
-    if (player && inv == &player->inventory2 && session && !session->dialog) session.reset();
+    if (player && inv == &player->inventory2 && session && !session->dialog) CloseSession();
     CloseHook(inv, edx);
 }
 
@@ -1117,9 +1139,10 @@ auto PollHook = Union::CreateHook(
 void __cdecl PollInventory() {
     for (int i = 0; i < HotbarSlots; ++i) if (!(GetAsyncKeyState(VK_F1 + i) & 0x8000)) functionHeld[i] = false;
     PollHook();
+    if (shuttingDown) return;
     if (auto* dialog = ActiveTrade()) {
         if (!session || session->dialog != dialog) {
-            session.reset();
+            CloseSession();
             auto next = std::make_unique<InventorySession>();
             if (!next->trade.Open()) return;
             auto& inv = player->inventory2;
@@ -1128,17 +1151,17 @@ void __cdecl PollInventory() {
             next->dialog = dialog;
             next->trade.Refresh(*dialog);
             next->trade.Layout();
-            session = std::move(next);
+            session = next.release();
         }
         if (session->PollTrade()) {
             dialog->OnKeyEsc();
-            session.reset();
+            CloseSession();
         }
         return;
     }
-    if (session && session->dialog) session.reset();
+    if (session && session->dialog) CloseSession();
     if (!player || !PersonalInventory(&player->inventory2)) {
-        session.reset();
+        CloseSession();
         return;
     }
     auto& inv = player->inventory2;
@@ -1149,7 +1172,7 @@ void __cdecl PollInventory() {
         if (inv.GetNumItemsInPackString() > 0) inv.UnpackAllItems();
         next->panel.Layout();
         next->panel.Refresh(inv);
-        session = std::move(next);
+        session = next.release();
     }
     const auto result = session->Poll(inv);
     if (result == Command::Close) player->CloseInventory();

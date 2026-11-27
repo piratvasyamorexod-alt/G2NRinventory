@@ -81,13 +81,13 @@ public:
     }
 
     template<class Resolve>
-    void Load(std::istream& input, Resolve resolve) {
+    bool Load(std::istream& input, Resolve resolve) {
         recent.clear();
         readDocuments.clear();
         sale.clear();
         hotbar.fill(-1);
         std::string line;
-        if (!std::getline(input, line) || (line != "G2NRinventory 1" && line != "G2NRinventory 2")) return;
+        if (!std::getline(input, line) || (line != "G2NRinventory 1" && line != "G2NRinventory 2")) return false;
         while (std::getline(input, line)) {
             std::istringstream record(line);
             char kind;
@@ -103,6 +103,7 @@ public:
                 if (instance >= 0) SetHotbar(slot, instance);
             }
         }
+        return !input.bad();
     }
 
     template<class Resolve>
