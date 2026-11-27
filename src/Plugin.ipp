@@ -1012,6 +1012,13 @@ auto KeyHook = Union::CreateHook(
 
 void UseSelected(oCNpcInventory& inv) {
     if (!session || !zinput || !PersonalInventory(&inv) || !session->panel.SelectNative(inv)) return;
+    auto* item = inv.GetSelectedItem();
+    if (item && IsInstantConsumable(*item)) {
+        ConsumeInstantly(*player, *item);
+        if (session && PersonalInventory(&inv)) session->panel.Refresh(inv);
+        return;
+    }
+
     auto* input = zinput;
     // The native inventory recognizes its mouse action when the input edge is set.
     constexpr int button = MOUSE_BUTTONLEFT;

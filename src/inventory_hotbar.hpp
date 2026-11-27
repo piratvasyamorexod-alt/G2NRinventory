@@ -51,10 +51,54 @@ bool HotbarInWorld() {
     return true;
 }
 
+bool IsInstantConsumable(oCItem& item) {
+    constexpr int consumables = ITM_CAT_FOOD | ITM_CAT_POTION;
+    // Items with a longer interaction sequence still need the native state machine.
+    return (item.mainflag & consumables) && ActionFor(item) == HotbarAction::Use
+        && item.GetStateEffectFunc(0) > 0 && item.GetStateEffectFunc(1) <= 0
+        && item.GetStateEffectFunc(2) <= 0 && item.GetStateEffectFunc(3) <= 0;
+}
+
+void ConsumeInstantly(oCNpc& npc, oCItem& item) {
+    if (!parser || npc.IsDead() || npc.GetInteractMob() || npc.interactItem
+        || !npc.GetHomeWorld() || item.amount <= 0 || (item.flags & ITM_FLAG_ACTIVE)) return;
+
+    const int body = npc.GetBodyState();
+    const int state = body & BS_ONLY_STATE;
+    if ((body & (BS_MOD_TRANSFORMED | BS_MOD_CONTROLLED | BS_MOD_CONTROLLING))
+        || (state > BS_SPRINT && state != BS_INVENTORY && state != BS_STUMBLE
+            && (state < BS_AIMNEAR || state > BS_CASTING))) return;
+
+    auto* scripts = parser;
+    const int callback = item.GetStateEffectFunc(0);
+    const auto* effect = scripts->GetSymbol(callback);
+    const int selfIndex = scripts->GetIndex(zSTRING("SELF"));
+    const int itemIndex = scripts->GetIndex(zSTRING("ITEM"));
+    auto* selfSymbol = scripts->GetSymbol(selfIndex);
+    auto* itemSymbol = scripts->GetSymbol(itemIndex);
+    if (!effect || effect->type != zPAR_TYPE_FUNC || effect->ele != 0
+        || !selfSymbol || selfSymbol->type != zPAR_TYPE_INSTANCE
+        || !itemSymbol || itemSymbol->type != zPAR_TYPE_INSTANCE || !npc.CanUse(&item)) return;
+
+    auto* previousSelf = selfSymbol->GetInstanceAdr();
+    auto* previousItem = itemSymbol->GetInstanceAdr();
+    auto* consumed = npc.RemoveFromInv(&item, 1);
+    if (!consumed) return;
+    consumed->AddRef();
+
+    // The animated use event binds SELF and ITEM before calling on_state[0].
+    scripts->SetInstance(selfIndex, &npc);
+    scripts->SetInstance(itemIndex, consumed);
+    scripts->CallFunc(callback);
+    scripts->SetInstance(selfIndex, previousSelf);
+    scripts->SetInstance(itemIndex, previousItem == consumed ? nullptr : previousItem);
+
+    if (auto* world = consumed->GetHomeWorld()) world->RemoveVob(consumed);
+    consumed->Release();
+}
+
 void UseHotbar(int slot) {
     if (!player->GetAnictrl() || player->GetInteractMob() || player->interactItem) return;
-    const int state = player->GetBodyState() & BS_ONLY_STATE;
-    if (state < BS_STAND || state > BS_SPRINT) return;
     auto& inv = player->inventory2;
     const int instance = history.Hotbar()[slot];
     auto stock = StockFor(inv, instance);
@@ -63,6 +107,13 @@ void UseHotbar(int slot) {
         stock = StockFor(inv, instance);
     }
     if (!stock.item) return;
+    if (IsInstantConsumable(*stock.item)) {
+        ConsumeInstantly(*player, *stock.item);
+        return;
+    }
+
+    const int state = player->GetBodyState() & BS_ONLY_STATE;
+    if (state < BS_STAND || state > BS_SPRINT) return;
     const auto action = ActionFor(*stock.item);
     if (action == HotbarAction::None || (action == HotbarAction::Equip && (stock.item->flags & ITM_FLAG_ACTIVE))) return;
     auto* events = player->GetEM();
