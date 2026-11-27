@@ -15,58 +15,142 @@ int DocumentInstance(oCItem* item) {
 
 constexpr auto InventorySaveFile = L"G2NRINVENTORY.SAV";
 
-std::filesystem::path CurrentSaveFolder(oCSavegameManager* manager) {
+std::filesystem::path InventorySaveFolder(oCSavegameManager* manager, int slot) {
     if (!zoptions || !manager) return {};
     const auto& root = zoptions->GetDirString(DIR_SAVEGAMES);
-    const auto currentSlot = manager->GetSlotDirName(-1);
-    if (root.IsEmpty() || currentSlot.IsEmpty()) return {};
-    return std::filesystem::path(root.ToChar()) / currentSlot.ToChar();
+    const auto slotName = manager->GetSlotDirName(slot);
+    if (root.IsEmpty() || slotName.IsEmpty()) return {};
+    return std::filesystem::path(root.ToChar()) / slotName.ToChar();
 }
 
-bool ReadHistory(const std::filesystem::path& path) {
-    if (path.empty() || !parser) return false;
-    std::error_code error;
-    if (std::filesystem::file_size(path, error) > 1024 * 1024 || error) return false;
-    std::ifstream in(path, std::ios::binary);
-    if (!in) return false;
+bool RestoreHistory(std::istream& input) {
     InventoryHistory::History restored;
-    if (!restored.Load(in, [](const std::string& name) { return parser->GetIndex(zSTRING(name.c_str())); })) return false;
+    if (!restored.Load(input, [](const std::string& name) { return parser->GetIndex(zSTRING(name.c_str())); })) return false;
     history = std::move(restored);
     return true;
 }
 
-bool WriteHistory(const std::filesystem::path& path) {
-    if (path.empty() || !parser) return false;
-    auto temporary = path;
-    temporary += L".tmp";
-    std::ofstream out(temporary, std::ios::binary);
-    if (!out) return false;
-    history.Save(out, [](int index) -> std::string {
-        if (auto* symbol = parser->GetSymbol(index)) {
-            return symbol->name.ToChar();
+bool ReadHistory(const std::filesystem::path& path) {
+    if (!parser) return false;
+    std::error_code error;
+    if (std::filesystem::file_size(path, error) > 1024 * 1024 || error) return false;
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return false;
+    std::string header;
+    std::getline(in, header);
+    in.clear();
+    in.seekg(0);
+    if (header != "ZenGin Archive" && header != "ZenGin Archive\r") return RestoreHistory(in);
+    in.close();
+
+    auto* archive = zarcFactory->CreateArchiverRead(zSTRING(path.string().c_str()), 0);
+    if (!archive) return false;
+    const int count = archive->ReadInt("recordCount");
+    const bool valid = count > 0 && count <= 16384;
+    std::stringstream records;
+    if (valid) {
+        for (int i = 0; i < count; ++i) {
+            zSTRING line;
+            archive->ReadString("record", line);
+            records << line.ToChar() << '\n';
         }
+    }
+    archive->Close();
+    archive->Release();
+    return valid && RestoreHistory(records);
+}
+
+bool WriteHistory(const std::filesystem::path& path) {
+    if (!parser) return false;
+    std::stringstream records;
+    history.Save(records, [](int index) -> std::string {
+        if (auto* symbol = parser->GetSymbol(index)) return symbol->name.ToChar();
         return {};
     });
-    out.close();
-    if (!out || !MoveFileExW(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+    std::vector<std::string> lines;
+    for (std::string line; std::getline(records, line);) lines.push_back(std::move(line));
+    if (lines.size() > 16384) return false;
+
+    auto temporary = path;
+    temporary += L".TMP";
+    auto* archive = zarcFactory->CreateArchiverWrite(
+        zSTRING(temporary.string().c_str()), zARC_MODE_BINARY_SAFE, TRUE, 0);
+    if (!archive) {
         DeleteFileW(temporary.c_str());
         return false;
     }
-    return true;
+    archive->WriteInt("recordCount", static_cast<int>(lines.size()));
+    for (const auto& line : lines) archive->WriteString("record", zSTRING(line.c_str()));
+    archive->Close();
+    archive->Release();
+
+    if (MoveFileExW(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) return true;
+    DeleteFileW(temporary.c_str());
+    return false;
 }
+
+void SaveInventory(oCSavegameManager* manager, int slot) {
+    const auto directory = InventorySaveFolder(manager, slot);
+    if (directory.empty() || !WriteHistory(directory / InventorySaveFile)) {
+        OutputDebugStringW(L"G2NRinventory: could not write G2NRINVENTORY.SAV.\n");
+        if (zerr) zerr->Warning(zSTRING("G2NRinventory: could not write G2NRINVENTORY.SAV"));
+    }
+}
+
+void RestoreInventory(oCSavegameManager* manager, int slot) {
+    history = {};
+    const auto directory = InventorySaveFolder(manager, slot);
+    if (!directory.empty() && !ReadHistory(directory / InventorySaveFile)) {
+        ReadHistory(directory / L"G2NRinventory.dat");
+    }
+}
+
+const int* unionSaveSlot = nullptr;
+
+void __cdecl OnUnionSaveEnd() {
+    if (ogame && unionSaveSlot && *unionSaveSlot >= 0) SaveInventory(ogame->savegameManager, *unionSaveSlot);
+}
+
+void __cdecl OnUnionLoadEnd() {
+    if (ogame && unionSaveSlot && *unionSaveSlot >= 0) RestoreInventory(ogame->savegameManager, *unionSaveSlot);
+}
+
+void __cdecl UnusedUnionSaveEvent() {}
+
+bool RegisterUnionSaveEvents() {
+    // Legacy Union exposes its application callbacks and current slot through Shw32.
+    // Resolve them at runtime so the native engine hooks can still serve other loaders.
+    if (GetGameVersion() != Engine_G2A) return false;
+    const auto core = GetModuleHandleW(L"Shw32.dll");
+    if (!core) return false;
+    using Event = void (__cdecl*)();
+    using Register = void* (__cdecl*)(
+        Event, Event, Event, Event, Event, Event, Event,
+        Event, Event, Event, Event, Event, Event, Event,
+        Event, Event, Event, Event, Event, Event, Event);
+    const auto install = reinterpret_cast<Register>(GetProcAddress(core,
+        "?CreateRefApplication@CApplication@UnionCore@@SAPAV12@P6AXXZ00000000000000000000@Z"));
+    unionSaveSlot = reinterpret_cast<const int*>(GetProcAddress(core,
+        "?SaveLoadGameInfo@UnionCore@@3UTSaveLoadGameInfo@1@A"));
+    if (!install || !unionSaveSlot) return false;
+    constexpr Event idle = UnusedUnionSaveEvent;
+    return install(
+        idle, idle, idle, idle, idle, idle, idle, // Entry through MenuLoop
+        idle, OnUnionSaveEnd,
+        idle, idle, // New game
+        idle, OnUnionLoadEnd, // Load a saved game
+        idle, idle, idle, idle, idle, idle, idle, idle) != nullptr;
+}
+
+const bool useUnionSaveEvents = RegisterUnionSaveEvents();
 
 void __fastcall SaveInventoryWithSlot(oCSavegameManager*, void*, int);
 auto SaveInventoryWithSlotHook = Union::CreateHook(
-    SIGNATURE_OF(&oCSavegameManager::CopyFromCurrent), &SaveInventoryWithSlot, Union::HookType::Hook_Detours);
+    useUnionSaveEvents ? nullptr : SIGNATURE_OF(&oCSavegameManager::CopyFromCurrent),
+    &SaveInventoryWithSlot, Union::HookType::Hook_Detours);
 
 void __fastcall SaveInventoryWithSlot(oCSavegameManager* manager, void* edx, int slot) {
-    if (slot >= 0) {
-        // Gothic copies the working save directory to the chosen slot here.
-        const auto directory = CurrentSaveFolder(manager);
-        if (directory.empty() || !WriteHistory(directory / InventorySaveFile)) {
-            OutputDebugStringW(L"G2NRinventory: could not write the inventory file before copying the save slot.\n");
-        }
-    }
+    if (slot >= 0) SaveInventory(manager, -1);
     SaveInventoryWithSlotHook(manager, edx, slot);
 }
 
@@ -78,13 +162,8 @@ void __fastcall LoadHistory(oCGame* game, void* edx, int slot, int globals) {
     const bool previous = std::exchange(trackingPaused, true);
     LoadHistoryHook(game, edx, slot, globals);
     trackingPaused = previous;
-    if (slot < 0 || !globals || !player) return;
-
-    // A full load has copied the selected slot back into the working directory.
-    history = {};
-    const auto directory = CurrentSaveFolder(game->savegameManager);
-    if (!directory.empty() && !ReadHistory(directory / InventorySaveFile)) {
-        ReadHistory(directory / L"G2NRinventory.dat");
+    if (!useUnionSaveEvents && slot >= 0 && globals && player) {
+        RestoreInventory(game->savegameManager, -1);
     }
 }
 
