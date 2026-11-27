@@ -2,6 +2,7 @@
 
 #include "inventory_layout.hpp"
 #include "inventory_history.hpp"
+#include "inventory_archive.hpp"
 #include "inventory_trade_rules.hpp"
 #include "mouse_win32.hpp"
 

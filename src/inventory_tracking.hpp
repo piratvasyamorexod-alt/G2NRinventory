@@ -38,35 +38,23 @@ bool RestoreHistory(std::istream& input) {
 
 bool ReadHistory(const std::filesystem::path& path) {
     if (!parser) return false;
-    std::error_code error;
-    const auto size = std::filesystem::file_size(path, error);
-    if (error || !size || size > MaximumInventoryArchiveSize) return false;
-    std::ifstream in(path, std::ios::binary);
+    std::ifstream in(path, std::ios::binary | std::ios::ate);
     if (!in) return false;
+    const auto size = in.tellg();
+    if (size <= 0 || size > static_cast<std::streamoff>(MaximumInventoryArchiveSize)) return false;
+    in.seekg(0);
     std::string header;
     std::getline(in, header);
     in.clear();
     in.seekg(0);
     if (header != "ZenGin Archive" && header != "ZenGin Archive\r") return RestoreHistory(in);
-    std::vector<char> bytes(static_cast<std::size_t>(size));
-    if (!in.read(bytes.data(), static_cast<std::streamsize>(bytes.size()))) return false;
-    in.close();
 
-    zCBuffer buffer(bytes.data(), static_cast<unsigned long>(bytes.size()));
-    auto* archive = zarcFactory->CreateArchiverRead(&buffer, 0);
-    if (!archive) return false;
-    const int count = archive->ReadInt("recordCount");
-    bool valid = count > 0 && count <= 16384;
-    std::stringstream records;
-    for (int i = 0; valid && i < count; ++i) {
-        zSTRING line;
-        archive->ReadString("record", line);
-        valid = !line.IsEmpty();
-        if (valid) records << line.ToChar() << '\n';
-    }
-    archive->Close();
-    archive->Release();
-    return valid && !buffer.HasError() && RestoreHistory(records);
+    std::string bytes(static_cast<std::size_t>(size), '\0');
+    if (!in.read(bytes.data(), static_cast<std::streamsize>(bytes.size()))) return false;
+    std::string records;
+    if (!InventoryArchive::ExtractRecords(bytes, records)) return false;
+    std::istringstream recordStream(records);
+    return RestoreHistory(recordStream);
 }
 
 bool WriteHistory(const std::filesystem::path& path) {
@@ -78,55 +66,62 @@ bool WriteHistory(const std::filesystem::path& path) {
     });
     std::vector<std::string> lines;
     for (std::string line; std::getline(records, line);) lines.push_back(std::move(line));
-    if (lines.size() > 16384) return false;
+    if (lines.size() > InventoryArchive::MaxRecords) return false;
 
-    // Serialize with ZenGin without handing it a file handle. Use native
-    // filesystem I/O for both the interim file and its final rename.
-    zCBuffer buffer(MaximumInventoryArchiveSize);
-    auto* archive = zarcFactory->CreateArchiverWrite(&buffer, zARC_MODE_BINARY_SAFE, TRUE, 0);
+    // Write into the slot Union just saved, using ZenGin for both path and I/O.
+    auto* archive = zarcFactory->CreateArchiverWrite(
+        zSTRING(path.string().c_str()), zARC_MODE_BINARY_SAFE, TRUE, 0);
     if (!archive) return false;
     archive->WriteInt("recordCount", static_cast<int>(lines.size()));
     for (const auto& line : lines) archive->WriteString("record", zSTRING(line.c_str()));
     archive->Close();
     archive->Release();
+    return true;
+}
 
-    if (buffer.HasError() || !buffer.GetSize()) return false;
+std::size_t BoundHotbarSlots() {
+    const auto& slots = history.Hotbar();
+    return std::count_if(slots.begin(), slots.end(), [](int instance) { return instance >= 0; });
+}
 
-    const auto temporary = PendingInventorySave(path);
-    std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
-    if (!out) return false;
-    out.write(reinterpret_cast<const char*>(buffer.GetBuffer()), buffer.GetSize());
-    out.close();
-    if (!out) {
-        DeleteFileW(temporary.c_str());
-        return false;
+void LogInventorySave(std::string_view operation, int slot, std::string_view outcome) {
+    wchar_t executable[32768]{};
+    const auto size = GetModuleFileNameW(nullptr, executable, static_cast<DWORD>(std::size(executable)));
+    if (!size || size >= std::size(executable)) return;
+    auto path = std::filesystem::path(executable).parent_path() / L"G2NRinventory-save.log";
+    std::error_code error;
+    const auto length = std::filesystem::file_size(path, error);
+    const auto mode = !error && length >= 65536 ? std::ios::trunc : std::ios::app;
+    std::ofstream log(path, mode);
+    if (log) {
+        log << "0.1.19 " << operation << " slot=" << slot << " " << outcome
+            << " bindings=" << BoundHotbarSlots() << '\n';
     }
-    // Keep the complete archive available for recovery if a rename is blocked.
-    return MoveFileExW(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
 }
 
 void SaveInventory(oCSavegameManager* manager, int slot) {
     const auto directory = InventorySaveFolder(manager, slot);
-    if (directory.empty() || !WriteHistory(directory / InventorySaveFile)) {
-        OutputDebugStringW(L"G2NRinventory: could not write G2NRINVENTORY.SAV.\n");
-        if (zerr) zerr->Warning(zSTRING("G2NRinventory: could not write G2NRINVENTORY.SAV"));
-    }
+    const bool written = !directory.empty() && WriteHistory(directory / InventorySaveFile);
+    LogInventorySave("save", slot, written ? "archive closed" : "write failed");
+    if (!written && zerr) zerr->Warning(zSTRING("G2NRinventory: could not write G2NRINVENTORY.SAV"));
 }
 
 void RestoreInventory(oCSavegameManager* manager, int slot) {
     history = {};
     const auto directory = InventorySaveFolder(manager, slot);
-    if (directory.empty()) return;
-    const auto path = directory / InventorySaveFile;
-    const auto temporary = PendingInventorySave(path);
-    std::error_code pendingError, savedError;
-    const auto pendingTime = std::filesystem::last_write_time(temporary, pendingError);
-    const auto savedTime = std::filesystem::last_write_time(path, savedError);
-    const bool pendingIsNewer = !pendingError && (savedError || pendingTime >= savedTime);
-    if (pendingIsNewer && ReadHistory(temporary)) return;
-    if (ReadHistory(path)) return;
-    if (!pendingIsNewer && !pendingError && ReadHistory(temporary)) return;
-    ReadHistory(directory / L"G2NRinventory.dat");
+    if (directory.empty()) {
+        LogInventorySave("load", slot, "no directory");
+        return;
+    }
+    if (ReadHistory(directory / InventorySaveFile)) {
+        LogInventorySave("load", slot, "SAV");
+    } else if (ReadHistory(PendingInventorySave(directory / InventorySaveFile))) {
+        LogInventorySave("load", slot, "TMP");
+    } else if (ReadHistory(directory / L"G2NRinventory.dat")) {
+        LogInventorySave("load", slot, "legacy");
+    } else {
+        LogInventorySave("load", slot, "no readable archive");
+    }
 }
 
 const int* unionSaveSlot = nullptr;
