@@ -813,12 +813,12 @@ class InventorySession {
     };
     std::optional<Press> pressedItem;
 
-    void ReleaseMouse() {
+    void ReleaseMouse(bool reacquire = true) {
         if (!std::exchange(active, false)) return;
         cursor.Leave();
         if (std::exchange(restoreMouse, false) && zinput && !zinput->GetDeviceEnabled(zINPUT_MOUSE)) {
             zinput->SetDeviceEnabled(zINPUT_MOUSE, TRUE);
-            ApplyMouseAcquisition();
+            if (reacquire) ApplyMouseAcquisition();
         }
     }
 
@@ -868,7 +868,12 @@ public:
     TradePanel trade{panel};
     oCViewDialogTrade* dialog = nullptr;
 
-    ~InventorySession() { ReleaseMouse(); }
+    ~InventorySession() { StopMouse(); }
+
+    void StopMouse(bool reacquire = true) {
+        events.Stop();
+        ReleaseMouse(reacquire);
+    }
 
     bool HasFocus() const { return InventoryMouse::HasFocus(window); }
 
@@ -971,10 +976,17 @@ public:
 InventorySession* session = nullptr;
 HotbarPanel* hotbar = nullptr;
 bool shuttingDown = false;
+bool endingGameSession = false;
+bool inMainMenu = false;
 std::array<bool, HotbarSlots> functionHeld{};
 
-void CloseSession() {
-    delete std::exchange(session, nullptr);
+bool InventoryAvailable() {
+    return !shuttingDown && !endingGameSession && !inMainMenu && (!gameMan || !gameMan->exitGame);
+}
+
+void CloseSession(bool reacquire = true) {
+    std::unique_ptr<InventorySession> closing(std::exchange(session, nullptr));
+    if (closing) closing->StopMouse(reacquire);
 }
 
 HotbarPanel& GetHotbar() {
@@ -983,9 +995,14 @@ HotbarPanel& GetHotbar() {
 }
 
 void ReleaseInventoryUi() {
-    CloseSession();
+    CloseSession(false);
     delete std::exchange(hotbar, nullptr);
     functionHeld.fill(false);
+}
+
+void BeginInventoryShutdown() {
+    if (std::exchange(shuttingDown, true)) return;
+    ReleaseInventoryUi();
 }
 
 int __fastcall InventoryKey(oCNpcInventory*, void*, int);
@@ -1058,6 +1075,10 @@ auto DrawHook = Union::CreateHook(
     SIGNATURE_OF(&oCItemContainer::Draw), &DrawInventory, Union::HookType::Hook_Detours);
 
 void __fastcall DrawInventory(oCItemContainer* container, void* edx) {
+    if (!InventoryAvailable()) {
+        DrawHook(container, edx);
+        return;
+    }
     if (session && session->dialog && ActiveTrade() == session->dialog) {
         auto& dialog = *session->dialog;
         if (container == TradePanel::Container(dialog, 0)) return;
@@ -1085,7 +1106,7 @@ auto DrawHudHook = Union::CreateHook(
 
 void __fastcall DrawHotbarHud(oCGame* game, void* edx) {
     DrawHudHook(game, edx);
-    if (!shuttingDown && game == ogame && zrenderer && HotbarInWorld()) {
+    if (InventoryAvailable() && game == ogame && zrenderer && HotbarInWorld()) {
         GetHotbar().Draw(player->inventory2, false, std::nullopt, nullptr);
     }
 }
@@ -1095,7 +1116,7 @@ auto HotbarKeyHook = Union::CreateHook(
     SIGNATURE_OF(&oCGame::HandleEvent), &HotbarKey, Union::HookType::Hook_Detours);
 
 int __fastcall HotbarKey(oCGame* game, void* edx, int key) {
-    if (shuttingDown || key < KEY_F1 || key > KEY_F10 || game != ogame || history.Hotbar()[key - KEY_F1] < 0
+    if (!InventoryAvailable() || key < KEY_F1 || key > KEY_F10 || game != ogame || history.Hotbar()[key - KEY_F1] < 0
         || ((GetAsyncKeyState(VK_MENU) | GetAsyncKeyState(VK_CONTROL) | GetAsyncKeyState(VK_SHIFT)) & 0x8000)
         || !InventoryMouse::HasFocus(hWndApp) || !HotbarInWorld()) return HotbarKeyHook(game, edx, key);
     const int slot = key - KEY_F1;
@@ -1109,8 +1130,28 @@ auto DoneHotbarHook = Union::CreateHook(
     SIGNATURE_OF(&oCGame::Done), &DoneHotbar, Union::HookType::Hook_Detours);
 
 void __fastcall DoneHotbar(oCGame* game, void* edx) {
-    if (game == ogame) ReleaseInventoryUi();
+    if (game != ogame) {
+        DoneHotbarHook(game, edx);
+        return;
+    }
+    const bool previous = std::exchange(endingGameSession, true);
+    ReleaseInventoryUi();
     DoneHotbarHook(game, edx);
+    endingGameSession = previous;
+}
+
+void __fastcall InventoryMainMenu(CGameManager*, void*, int);
+auto MainMenuHook = Union::CreateHook(
+    SIGNATURE_OF(&CGameManager::Menu), &InventoryMainMenu, Union::HookType::Hook_Detours);
+
+void __fastcall InventoryMainMenu(CGameManager* manager, void* edx, int mode) {
+    // The main menu sets exitGame directly. Clean up before its caller
+    // unregisters menu views and starts dismantling the engine.
+    CloseSession(InventoryAvailable());
+    const bool previous = std::exchange(inMainMenu, true);
+    MainMenuHook(manager, edx, mode);
+    if (manager->exitGame) BeginInventoryShutdown();
+    inMainMenu = previous;
 }
 
 void __fastcall StopInventory(CGameManager*, void*);
@@ -1118,8 +1159,7 @@ auto StopInventoryHook = Union::CreateHook(
     SIGNATURE_OF(&CGameManager::Done), &StopInventory, Union::HookType::Hook_Detours);
 
 void __fastcall StopInventory(CGameManager* manager, void* edx) {
-    shuttingDown = true;
-    ReleaseInventoryUi();
+    BeginInventoryShutdown();
     StopInventoryHook(manager, edx);
 }
 
@@ -1128,7 +1168,7 @@ auto CloseHook = Union::CreateHook(
     SIGNATURE_OF(&oCNpcInventory::Close), &CloseInventory, Union::HookType::Hook_Detours);
 
 void __fastcall CloseInventory(oCNpcInventory* inv, void* edx) {
-    if (player && inv == &player->inventory2 && session && !session->dialog) CloseSession();
+    if (player && inv == &player->inventory2 && session && !session->dialog) CloseSession(InventoryAvailable());
     CloseHook(inv, edx);
 }
 
@@ -1139,7 +1179,7 @@ auto PollHook = Union::CreateHook(
 void __cdecl PollInventory() {
     for (int i = 0; i < HotbarSlots; ++i) if (!(GetAsyncKeyState(VK_F1 + i) & 0x8000)) functionHeld[i] = false;
     PollHook();
-    if (shuttingDown) return;
+    if (!InventoryAvailable()) return;
     if (auto* dialog = ActiveTrade()) {
         if (!session || session->dialog != dialog) {
             CloseSession();
