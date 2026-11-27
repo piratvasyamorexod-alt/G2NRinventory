@@ -21,12 +21,30 @@ std::filesystem::path PendingInventorySave(std::filesystem::path path) {
     return path;
 }
 
+std::filesystem::path GameSystemDirectory() {
+    wchar_t executable[32768]{};
+    const auto length = GetModuleFileNameW(nullptr, executable, static_cast<DWORD>(std::size(executable)));
+    if (!length || length >= std::size(executable)) return {};
+    return std::filesystem::path(executable).parent_path();
+}
+
 std::filesystem::path InventorySaveFolder(oCSavegameManager* manager, int slot) {
     if (!zoptions || !manager) return {};
-    const auto& root = zoptions->GetDirString(DIR_SAVEGAMES);
+    const auto& configuredRoot = zoptions->GetDirString(DIR_SAVEGAMES);
     const auto slotName = manager->GetSlotDirName(slot);
-    if (root.IsEmpty() || slotName.IsEmpty()) return {};
-    return (std::filesystem::path(root.ToChar()) / slotName.ToChar()).make_preferred();
+    if (configuredRoot.IsEmpty() || slotName.IsEmpty()) return {};
+
+    std::filesystem::path root(configuredRoot.ToChar());
+    if (root.is_relative()) {
+        // Menus and the engine change the working directory. Anchor relative
+        // save paths to the game root for both writing and loading.
+        const auto& engineRoot = zFILE::s_rootDirString;
+        auto gameRoot = std::filesystem::path(engineRoot.ToChar());
+        if (!gameRoot.is_absolute()) gameRoot = GameSystemDirectory().parent_path();
+        if (gameRoot.empty()) return {};
+        root = gameRoot / root;
+    }
+    return (root / slotName.ToChar()).make_preferred();
 }
 
 bool RestoreHistory(std::istream& input) {
@@ -37,37 +55,28 @@ bool RestoreHistory(std::istream& input) {
 }
 
 bool ReadHistoryRecords(const std::filesystem::path& path, std::string& records, std::string& status) {
-    if (!zfactory) {
-        status = "no file factory";
+    // VFILE::Open can show a fatal error on missing files. Our sidecar is
+    // optional, including when a save was created without the plugin.
+    std::ifstream file(path, std::ios::binary | std::ios::ate);
+    if (!file) {
+        status = "file unavailable";
         return false;
     }
-
-    // CreateArchiverWrite uses this same factory with the same narrow path.
-    const zSTRING filename(path.string().c_str());
-    std::unique_ptr<zFILE> file(zfactory->CreateZFile(filename));
-    if (!file || file->Open(false) != 0) {
-        status = "engine open failed";
+    const auto size = file.tellg();
+    if (size <= 0 || size > static_cast<std::streamoff>(MaximumInventoryArchiveSize)) {
+        status = "invalid size=" + std::to_string(static_cast<std::streamoff>(size));
         return false;
     }
-
-    const long size = file->Size();
-    if (size <= 0 || static_cast<unsigned long>(size) > MaximumInventoryArchiveSize) {
-        file->Close();
-        status = "invalid size=" + std::to_string(size);
-        return false;
-    }
+    file.seekg(0);
     std::string bytes(static_cast<std::size_t>(size), '\0');
-    file->Seek(0);
-    const long read = file->Read(bytes.data(), size);
-    file->Close();
-    if (read != size) {
-        status = "short read=" + std::to_string(read) + "/" + std::to_string(size);
+    if (!file.read(bytes.data(), static_cast<std::streamsize>(bytes.size()))) {
+        status = "short read";
         return false;
     }
 
     if (bytes.compare(0, 14, "ZenGin Archive") == 0) {
         if (InventoryArchive::ExtractRecords(bytes, records)) return true;
-        status = "archive layout unrecognized, bytes=" + std::to_string(size);
+        status = "archive layout unrecognized, bytes=" + std::to_string(static_cast<std::streamoff>(size));
         return false;
     }
     records = std::move(bytes);
@@ -89,24 +98,19 @@ bool ReadHistory(const std::filesystem::path& path, std::string& status) {
 
 bool WriteHistory(const std::filesystem::path& path) {
     if (!parser) return false;
-    std::stringstream records;
+    std::ostringstream records;
     history.Save(records, [](int index) -> std::string {
         if (auto* symbol = parser->GetSymbol(index)) return symbol->name.ToChar();
         return {};
     });
-    std::vector<std::string> lines;
-    for (std::string line; std::getline(records, line);) lines.push_back(std::move(line));
-    if (lines.size() > InventoryArchive::MaxRecords) return false;
+    const auto bytes = records.str();
+    if (!records || bytes.size() > MaximumInventoryArchiveSize) return false;
 
-    // Write into the slot Union just saved, using ZenGin for both path and I/O.
-    auto* archive = zarcFactory->CreateArchiverWrite(
-        zSTRING(path.string().c_str()), zARC_MODE_BINARY_SAFE, TRUE, 0);
-    if (!archive) return false;
-    archive->WriteInt("recordCount", static_cast<int>(lines.size()));
-    for (const auto& line : lines) archive->WriteString("record", zSTRING(line.c_str()));
-    archive->Close();
-    archive->Release();
-    return true;
+    std::ofstream file(path, std::ios::binary | std::ios::trunc);
+    if (!file) return false;
+    file.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    file.close();
+    return static_cast<bool>(file);
 }
 
 std::size_t BoundHotbarSlots() {
@@ -115,16 +119,15 @@ std::size_t BoundHotbarSlots() {
 }
 
 void LogInventorySave(std::string_view operation, int slot, std::string_view outcome) {
-    wchar_t executable[32768]{};
-    const auto size = GetModuleFileNameW(nullptr, executable, static_cast<DWORD>(std::size(executable)));
-    if (!size || size >= std::size(executable)) return;
-    auto path = std::filesystem::path(executable).parent_path() / L"G2NRinventory-save.log";
+    const auto system = GameSystemDirectory();
+    if (system.empty()) return;
+    const auto path = system / L"G2NRinventory-save.log";
     std::error_code error;
     const auto length = std::filesystem::file_size(path, error);
     const auto mode = !error && length >= 65536 ? std::ios::trunc : std::ios::app;
     std::ofstream log(path, mode);
     if (log) {
-        log << "0.1.20 " << operation << " slot=" << slot << " " << outcome
+        log << "0.1.21 " << operation << " slot=" << slot << " " << outcome
             << " bindings=" << BoundHotbarSlots() << '\n';
     }
 }
@@ -137,7 +140,7 @@ void SaveInventory(oCSavegameManager* manager, int slot) {
     std::string records;
     if (written && !ReadHistoryRecords(path, records, detail)) detail = "after write: " + detail;
     LogInventorySave("save", slot, detail);
-    if (!written && zerr) zerr->Warning(zSTRING("G2NRinventory: could not write G2NRINVENTORY.SAV"));
+    if (!written && zerr) zerr->Warning(zSTRING("G2NRinventory: could not write optional G2NRINVENTORY.SAV"));
 }
 
 void RestoreInventory(oCSavegameManager* manager, int slot) {
