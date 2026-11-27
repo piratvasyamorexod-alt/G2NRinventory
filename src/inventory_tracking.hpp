@@ -36,25 +36,55 @@ bool RestoreHistory(std::istream& input) {
     return true;
 }
 
-bool ReadHistory(const std::filesystem::path& path) {
-    if (!parser) return false;
-    std::ifstream in(path, std::ios::binary | std::ios::ate);
-    if (!in) return false;
-    const auto size = in.tellg();
-    if (size <= 0 || size > static_cast<std::streamoff>(MaximumInventoryArchiveSize)) return false;
-    in.seekg(0);
-    std::string header;
-    std::getline(in, header);
-    in.clear();
-    in.seekg(0);
-    if (header != "ZenGin Archive" && header != "ZenGin Archive\r") return RestoreHistory(in);
+bool ReadHistoryRecords(const std::filesystem::path& path, std::string& records, std::string& status) {
+    if (!zfactory) {
+        status = "no file factory";
+        return false;
+    }
 
+    // CreateArchiverWrite uses this same factory with the same narrow path.
+    const zSTRING filename(path.string().c_str());
+    std::unique_ptr<zFILE> file(zfactory->CreateZFile(filename));
+    if (!file || file->Open(false) != 0) {
+        status = "engine open failed";
+        return false;
+    }
+
+    const long size = file->Size();
+    if (size <= 0 || static_cast<unsigned long>(size) > MaximumInventoryArchiveSize) {
+        file->Close();
+        status = "invalid size=" + std::to_string(size);
+        return false;
+    }
     std::string bytes(static_cast<std::size_t>(size), '\0');
-    if (!in.read(bytes.data(), static_cast<std::streamsize>(bytes.size()))) return false;
+    file->Seek(0);
+    const long read = file->Read(bytes.data(), size);
+    file->Close();
+    if (read != size) {
+        status = "short read=" + std::to_string(read) + "/" + std::to_string(size);
+        return false;
+    }
+
+    if (bytes.compare(0, 14, "ZenGin Archive") == 0) {
+        if (InventoryArchive::ExtractRecords(bytes, records)) return true;
+        status = "archive layout unrecognized, bytes=" + std::to_string(size);
+        return false;
+    }
+    records = std::move(bytes);
+    return true;
+}
+
+bool ReadHistory(const std::filesystem::path& path, std::string& status) {
     std::string records;
-    if (!InventoryArchive::ExtractRecords(bytes, records)) return false;
-    std::istringstream recordStream(records);
-    return RestoreHistory(recordStream);
+    if (!ReadHistoryRecords(path, records, status)) return false;
+    if (!parser) {
+        status = "no script parser";
+        return false;
+    }
+    std::istringstream input(records);
+    if (RestoreHistory(input)) return true;
+    status = "inventory records invalid";
+    return false;
 }
 
 bool WriteHistory(const std::filesystem::path& path) {
@@ -94,15 +124,19 @@ void LogInventorySave(std::string_view operation, int slot, std::string_view out
     const auto mode = !error && length >= 65536 ? std::ios::trunc : std::ios::app;
     std::ofstream log(path, mode);
     if (log) {
-        log << "0.1.19 " << operation << " slot=" << slot << " " << outcome
+        log << "0.1.20 " << operation << " slot=" << slot << " " << outcome
             << " bindings=" << BoundHotbarSlots() << '\n';
     }
 }
 
 void SaveInventory(oCSavegameManager* manager, int slot) {
     const auto directory = InventorySaveFolder(manager, slot);
-    const bool written = !directory.empty() && WriteHistory(directory / InventorySaveFile);
-    LogInventorySave("save", slot, written ? "archive closed" : "write failed");
+    const auto path = directory / InventorySaveFile;
+    const bool written = !directory.empty() && WriteHistory(path);
+    std::string detail = written ? "archive verified" : "write failed";
+    std::string records;
+    if (written && !ReadHistoryRecords(path, records, detail)) detail = "after write: " + detail;
+    LogInventorySave("save", slot, detail);
     if (!written && zerr) zerr->Warning(zSTRING("G2NRinventory: could not write G2NRINVENTORY.SAV"));
 }
 
@@ -113,14 +147,16 @@ void RestoreInventory(oCSavegameManager* manager, int slot) {
         LogInventorySave("load", slot, "no directory");
         return;
     }
-    if (ReadHistory(directory / InventorySaveFile)) {
+    const auto path = directory / InventorySaveFile;
+    std::string archiveStatus, pendingStatus, legacyStatus;
+    if (ReadHistory(path, archiveStatus)) {
         LogInventorySave("load", slot, "SAV");
-    } else if (ReadHistory(PendingInventorySave(directory / InventorySaveFile))) {
+    } else if (ReadHistory(PendingInventorySave(path), pendingStatus)) {
         LogInventorySave("load", slot, "TMP");
-    } else if (ReadHistory(directory / L"G2NRinventory.dat")) {
+    } else if (ReadHistory(directory / L"G2NRinventory.dat", legacyStatus)) {
         LogInventorySave("load", slot, "legacy");
     } else {
-        LogInventorySave("load", slot, "no readable archive");
+        LogInventorySave("load", slot, "SAV=" + archiveStatus + ", TMP=" + pendingStatus + ", legacy=" + legacyStatus);
     }
 }
 
