@@ -551,13 +551,13 @@ public:
         const int tabHeight = lineHeight + 5;
         const int bodyTop = inset + lineHeight + 4 + 2 * tabHeight + 7;
         const int footerSpace = inset + lineHeight + 11;
-        const int hotbarBottom = InventoryLayout::PlaceHotbar(screen->psizex, screen->psizey).bounds.Bottom() + gap + 3;
-        const int available = (std::min)(screen->psizey * 77 / 100, screen->psizey - hotbarBottom - inset);
+        const int hotbarTop = InventoryLayout::PlaceHotbar(screen->psizex, screen->psizey).bounds.y - gap - 3;
+        const int available = (std::min)(screen->psizey * 77 / 100, hotbarTop - inset);
         grid = InventoryLayout::MakeGrid({inset, bodyTop, w - 2 * inset - scrollWidth,
                                           available - bodyTop - footerSpace}, target, gap);
         const int h = grid.area.Bottom() + footerSpace;
         bounds = InventoryLayout::PlacePanel(screen->psizex, screen->psizey, w, h, margin);
-        bounds.y = (std::max)(bounds.y, hotbarBottom);
+        bounds.y = (std::max)(inset, (std::min)(bounds.y, hotbarTop - h));
         Place(panel, bounds);
         Place(textView, bounds);
         grid.area.x += bounds.x;

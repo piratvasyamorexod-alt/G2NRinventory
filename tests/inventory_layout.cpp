@@ -102,7 +102,8 @@ int main() {
 
     for (const auto viewport : {Box{0, 0, 480, 360}, Box{0, 0, 1920, 1080}, Box{0, 0, 3840, 2160}}) {
         const auto bar = PlaceHotbar(viewport.width, viewport.height);
-        assert(bar.bounds.x > 0 && bar.bounds.Right() < viewport.width && bar.bounds.Bottom() < viewport.height / 4);
+        assert(bar.bounds.x > 0 && bar.bounds.Right() < viewport.width && bar.bounds.Bottom() < viewport.height);
+        assert(bar.bounds.y > 3 * viewport.height / 4 && bar.bounds.x == (viewport.width - bar.bounds.width) / 2);
         for (int i = 0; i < HotbarSlots; ++i) {
             const auto cell = bar.Cell(i);
             assert(bar.Hit(cell.x, cell.y) == i && bar.Hit(cell.Right() - 1, cell.Bottom() - 1) == i);

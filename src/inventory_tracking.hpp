@@ -13,25 +13,25 @@ int DocumentInstance(oCItem* item) {
     return item && ReadableDocument(*item) ? item->GetInstance() : -1;
 }
 
-std::filesystem::path HistoryPath(oCSavegameManager* manager, int slot) {
-    if (!zoptions || !manager || slot < 0) return {};
+std::filesystem::path HistoryPath(const zSTRING& slotDirectory) {
+    if (!zoptions || slotDirectory.IsEmpty()) return {};
     const auto& directory = zoptions->GetDirString(DIR_SAVEGAMES);
-    const auto name = manager->GetSlotDirName(slot);
-    if (directory.IsEmpty() || name.IsEmpty()) return {};
-    return std::filesystem::path(directory.ToChar()) / name.ToChar() / L"G2NRinventory.dat";
+    if (directory.IsEmpty()) return {};
+    return std::filesystem::path(directory.ToChar()) / slotDirectory.ToChar() / L"G2NRinventory.dat";
 }
 
-void ReadHistory(const std::filesystem::path& path) {
-    history = {};
-    if (path.empty()) return;
+bool ReadHistory(const std::filesystem::path& path) {
+    if (path.empty() || !parser) return false;
     std::error_code error;
-    if (std::filesystem::file_size(path, error) > 1024 * 1024) return;
+    if (std::filesystem::file_size(path, error) > 1024 * 1024 || error) return false;
     std::ifstream in(path, std::ios::binary);
+    if (!in) return false;
     history.Load(in, [](const std::string& name) { return parser->GetIndex(zSTRING(name.c_str())); });
+    return true;
 }
 
 void WriteHistory(const std::filesystem::path& path) {
-    if (path.empty()) return;
+    if (path.empty() || !parser) return;
     auto temporary = path;
     temporary += L".tmp";
     std::ofstream out(temporary, std::ios::binary);
@@ -48,13 +48,17 @@ void WriteHistory(const std::filesystem::path& path) {
     }
 }
 
-void __fastcall SaveHistory(oCSavegameManager*, void*, int, oCSavegameInfo*);
+void __fastcall SaveHistory(oCSavegameManager*, void*, int);
 auto SaveHistoryHook = Union::CreateHook(
-    SIGNATURE_OF(&oCSavegameManager::SetAndWriteSavegame), &SaveHistory, Union::HookType::Hook_Detours);
+    SIGNATURE_OF(&oCSavegameManager::CopyFromCurrent), &SaveHistory, Union::HookType::Hook_Detours);
 
-void __fastcall SaveHistory(oCSavegameManager* manager, void* edx, int slot, oCSavegameInfo* info) {
-    SaveHistoryHook(manager, edx, slot, info);
-    if (player) WriteHistory(HistoryPath(manager, slot));
+void __fastcall SaveHistory(oCSavegameManager* manager, void* edx, int slot) {
+    SaveHistoryHook(manager, edx, slot);
+    if (slot < 0 || !player) return;
+    // The native copy can replace the slot's files. Write the inventory data
+    // afterwards, in the same directory the copy used for its destination.
+    auto* info = manager->GetSavegame(slot);
+    WriteHistory(HistoryPath(info && !info->m_Dir.IsEmpty() ? info->m_Dir : manager->GetSlotDirName(slot)));
 }
 
 void __fastcall LoadHistory(oCGame*, void*, int, int);
@@ -66,7 +70,13 @@ void __fastcall LoadHistory(oCGame* game, void* edx, int slot, int globals) {
     LoadHistoryHook(game, edx, slot, globals);
     trackingPaused = previous;
     if (globals && slot >= 0) {
-        ReadHistory(HistoryPath(game->savegameManager, slot));
+        history = {};
+        if (auto* manager = game->savegameManager) {
+            auto* info = manager->GetSavegame(slot);
+            if (!info || !ReadHistory(HistoryPath(info->m_Dir))) {
+                ReadHistory(HistoryPath(manager->GetSlotDirName(slot)));
+            }
+        }
     }
 }
 

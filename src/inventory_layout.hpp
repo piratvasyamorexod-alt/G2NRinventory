@@ -41,7 +41,9 @@ inline HotbarLayout PlaceHotbar(int width, int height) {
     const int maxSize = (width - 2 * inset - (HotbarSlots + 1) * gap) / HotbarSlots;
     const int size = (std::min)(maxSize, std::clamp(height / 18, 35, 72));
     const int barWidth = HotbarSlots * size + (HotbarSlots - 1) * gap + 2 * inset;
-    return {{(width - barWidth) / 2, (std::max)(8, height / 36), barWidth, size + 2 * inset}, size, gap, inset};
+    const int barHeight = size + 2 * inset;
+    const int bottomMargin = std::clamp(height / 60, 8, 28);
+    return {{(width - barWidth) / 2, height - bottomMargin - barHeight, barWidth, barHeight}, size, gap, inset};
 }
 
 inline bool DraggedEnough(int x, int y, int initialX, int initialY, int threshold) {
