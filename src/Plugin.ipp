@@ -39,8 +39,9 @@ Category Classify(const oCItem& item) {
     if (item.mainflag & (ITM_CAT_NF | ITM_CAT_FF)) return Category::Weapons;
     if (item.mainflag & ITM_CAT_ARMOR) return Category::Armor;
     if (item.mainflag & ITM_CAT_MUN) return Category::Ammo;
+    if (item.mainflag & ITM_CAT_POTION) return Category::Potions;
     if (item.mainflag & (ITM_CAT_RUNE | ITM_CAT_MAGIC)) return Category::Magic;
-    if (item.mainflag & (ITM_CAT_FOOD | ITM_CAT_POTION)) return Category::Supplies;
+    if (item.mainflag & ITM_CAT_FOOD) return Category::Supplies;
     if (item.mainflag & ITM_CAT_DOCS) return Category::Documents;
     return Category::Other;
 }
@@ -122,8 +123,18 @@ constexpr std::array<DamageLabel, NPC_ATR_MAX> AttributeLabels{{
 }};
 constexpr std::array<DamageLabel, CategoryCount> CategoryLabels{{
     {L"Последнее", "Recent"}, {L"Все", "All"}, {L"Оружие", "Weapons"}, {L"Броня", "Armor"}, {L"Снаряды", "Ammo"},
-    {L"Магия", "Magic"}, {L"Припасы", "Supplies"}, {L"Записи", "Notes"}, {L"Разное", "Other"}, {L"На продажу", "For sale"}
+    {L"Магия", "Magic"}, {L"Зелья", "Potions"}, {L"Припасы", "Supplies"}, {L"Записи", "Notes"},
+    {L"Разное", "Other"}, {L"На продажу", "For sale"}
 }};
+constexpr std::array<const char*, CategoryCount> CategoryTextures{
+    "G2NRI_TAB_RECENT.TGA", "G2NRI_TAB_ALL.TGA", "G2NRI_TAB_WEAPONS.TGA", "G2NRI_TAB_ARMOR.TGA",
+    "G2NRI_TAB_AMMO.TGA", "G2NRI_TAB_MAGIC.TGA", "G2NRI_TAB_POTIONS.TGA", "G2NRI_TAB_SUPPLIES.TGA",
+    "G2NRI_TAB_DOCUMENTS.TGA", "G2NRI_TAB_OTHER.TGA", "G2NRI_TAB_SALE.TGA"
+};
+
+Category lastInventoryCategory = Category::Recent;
+
+int CategoryTabHeight() { return std::clamp(screen->psizey / 32, 26, 40); }
 
 enum class Command { None, Use, Close };
 
@@ -138,13 +149,16 @@ class InventoryPanel {
     zCView cursor{0, 0, 8, 8};
     zCView lockedMarker{0, 0, 8, 8};
     zCView unreadMarker{0, 0, 8, 8};
+    zCView readMarker{0, 0, 8, 8};
     zCView equippedMarker{0, 0, 8, 8};
-    Box bounds, close, tabs, listBar;
+    std::array<zCView, CategoryCount> tabIcons;
+    Box bounds, close, listBar;
+    InventoryLayout::FittedTabs tabs;
     Grid grid;
     std::vector<Entry> entries;
     std::vector<oCItem*> nativeItems;
     std::array<int, CategoryCount> counts{};
-    Category category = Category::Recent;
+    Category category = lastInventoryCategory;
     int inset = 0, lineHeight = 0, firstRow = 0;
     int selected = -1;
     oCItem* selectedItem = nullptr;
@@ -249,21 +263,51 @@ class InventoryPanel {
         sprite.Blit();
     }
 
-    void DrawTab(Box cell, const std::string& name, bool active, bool available, std::optional<POINT> point) {
-        if (cell.width <= 0) return;
-        const int x = cell.x + (std::max)(2, (cell.width - Width(name)) / 2);
-        Text(x, cell.y, name, cell.Right() - x - 1,
-             active || (point && cell.Hit(point->x, point->y)) ? Bright : available ? Bronze : Paper);
-        if (active) Fill({cell.x + 5, cell.Bottom() - 2, cell.width - 10, 2}, Bronze);
+    void DrawItemMarkers(oCItem& item, Box cell) {
+        const int size = std::clamp(cell.width / 3, 13, 24);
+        if (item.flags & ITM_FLAG_ACTIVE) DrawMarker(equippedMarker, cell.x + 2, cell.y + 2, size);
+        if (MissingRequirements(item)) DrawMarker(lockedMarker, cell.Right() - size - 2, cell.y + 2, size);
+        else if (ReadableDocument(item)) {
+            auto& marker = history.WasRead(item.GetInstance()) ? readMarker : unreadMarker;
+            DrawMarker(marker, cell.Right() - size - 2, cell.y + 2, size);
+        }
     }
 
-    void DrawTabs(Box area, Category current, const std::array<int, CategoryCount>& available, std::optional<POINT> point) {
-        Fill({area.x, area.Bottom() - 1, area.width, 1}, Rule);
+    void DrawTabs(const InventoryLayout::FittedTabs& layout, Category current,
+                  const std::array<int, CategoryCount>& available, std::optional<POINT> point) {
         for (int i = 0; i < CategoryCount; ++i) {
-            const auto tab = static_cast<Category>(i);
-            const auto& label = CategoryLabels[i];
-            DrawTab(InventoryLayout::CategoryTab(area, tab), Label(label.ru, label.en), tab == current, available[i] != 0, point);
+            const auto cell = layout.cells[i];
+            if (cell.width <= 0) continue;
+            const bool active = static_cast<Category>(i) == current;
+            const bool hovered = point && cell.Hit(point->x, point->y);
+            if (active || hovered) Fill({cell.x + 2, cell.y + 1, cell.width - 4, cell.height - 3}, 0xFF292D1E);
+            if (active) Fill({cell.x + 3, cell.Bottom() - 2, cell.width - 6, 2}, Bronze);
+            const int size = (std::min)(cell.width - 4, cell.height - 3);
+            if (size <= 0) continue;
+            auto& icon = tabIcons[i];
+            icon.SetTransparency(active || hovered || available[i] ? 255 : 170);
+            DrawMarker(icon, cell.x + (cell.width - size) / 2, cell.y + (cell.height - size) / 2 - 1, size);
         }
+    }
+
+    bool DrawTabTooltip(const InventoryLayout::FittedTabs& layout, POINT point) {
+        const auto hovered = layout.Hit(point.x, point.y);
+        if (!hovered) return false;
+        const auto& label = CategoryLabels[static_cast<int>(*hovered)];
+        const auto name = Label(label.ru, label.en);
+        constexpr int pad = 7;
+        const Box card = InventoryLayout::PlaceTooltip({1, 1, screen->psizex - 2, screen->psizey - 2},
+            point.x, point.y, Width(name) + 2 * pad, lineHeight + 2 * pad, 13);
+        Place(tooltipText, card);
+        tooltipText.ClrPrintwin();
+        const auto alpha = zrenderer->GetAlphaBlendSource();
+        zrenderer->SetAlphaBlendSource(zRND_ALPHA_SOURCE_MATERIAL);
+        Fill(card, 0xFF202318);
+        Frame(card, Rule);
+        zrenderer->SetAlphaBlendSource(alpha);
+        DrawText(tooltipText, card.x + pad, card.y + pad, name, card.width - 2 * pad, Bright);
+        tooltipText.DrawItems();
+        return true;
     }
 
     void ScrollBar(Box bar, int visible, int count, int top) {
@@ -512,7 +556,9 @@ public:
         InitSprite(cursor, "G2NRI_CURSOR.TGA");
         InitSprite(lockedMarker, "G2NRI_LOCKED.TGA");
         InitSprite(unreadMarker, "G2NRI_UNREAD.TGA");
+        InitSprite(readMarker, "G2NRI_READ.TGA");
         InitSprite(equippedMarker, "G2NRI_EQUIPPED.TGA");
+        for (int i = 0; i < CategoryCount; ++i) InitSprite(tabIcons[i], CategoryTextures[i]);
     }
 
     bool Ready() const { return panel.backTex && solid.backTex; }
@@ -549,8 +595,8 @@ public:
         const int scrollWidth = (std::max)(8, inset / 2);
         const int width = (std::max)(430, 7 * (target + gap) - gap + 2 * inset + scrollWidth);
         const int w = (std::min)(screen->psizex - 2 * margin, width);
-        const int tabHeight = lineHeight + 5;
-        const int bodyTop = inset + lineHeight + 4 + 2 * tabHeight + 7;
+        tabs = InventoryLayout::FitCategoryTabs(w - 2 * inset, CategoryTabHeight(), true);
+        const int bodyTop = inset + lineHeight + 4 + tabs.height + 7;
         const int footerSpace = inset + lineHeight + 11;
         const int hotbarTop = InventoryLayout::PlaceHotbar(screen->psizex, screen->psizey).bounds.y - gap - 3;
         const int available = (std::min)(screen->psizey * 77 / 100, hotbarTop - inset);
@@ -565,7 +611,7 @@ public:
         grid.area.y += bounds.y;
         const int top = bounds.y + inset;
         close = {bounds.Right() - inset - Width("Esc") - 8, top, Width("Esc") + 8, lineHeight};
-        tabs = {bounds.x + inset, top + lineHeight + 4, w - 2 * inset, 2 * tabHeight};
+        tabs.MoveBy(bounds.x + inset, top + lineHeight + 4);
         listBar = {grid.area.Right(), grid.area.y, scrollWidth, grid.area.height};
     }
 
@@ -639,7 +685,7 @@ public:
     void ChangeCategory(int delta, oCNpcInventory& inv) {
         const int next = (static_cast<int>(category) + delta + CategoryCount) % CategoryCount;
         if (next == static_cast<int>(category)) return;
-        category = static_cast<Category>(next);
+        category = lastInventoryCategory = static_cast<Category>(next);
         firstRow = tooltipTop = 0;
         selected = -1;
         selectedItem = nullptr;
@@ -697,7 +743,7 @@ public:
             return Command::None;
         }
         if (close.Hit(p.x, p.y)) return Command::Close;
-        if (const auto tab = InventoryLayout::CategoryAt(tabs, p.x, p.y)) {
+        if (const auto tab = tabs.Hit(p.x, p.y)) {
             ChangeCategory(static_cast<int>(*tab) - static_cast<int>(category), inv);
             return Command::None;
         }
@@ -734,7 +780,8 @@ public:
         const int left = bounds.x + inset;
         Text(left, close.y, Label(L"ИНВЕНТАРЬ", "INVENTORY"), close.x - left, Bronze);
         Text(close.x, close.y, "Esc", close.width, point && close.Hit(point->x, point->y) ? Bright : Bronze, true);
-        DrawTabs(tabs, category, counts, point);
+        DrawTabs(tabs, category, counts, quantity || dragging ? std::nullopt : point);
+        Fill({left, grid.area.y - 3, bounds.width - 2 * inset, 1}, Rule);
         const int first = firstRow * grid.columns, slots = grid.columns * grid.rows;
         for (int slot = 0; slot < slots; ++slot) {
             const int index = first + slot;
@@ -751,11 +798,11 @@ public:
         }
         ScrollBar(listBar, grid.rows, (static_cast<int>(entries.size()) + grid.columns - 1) / grid.columns, firstRow);
         const int footer = bounds.Bottom() - inset - lineHeight;
-        Fill({left, footer - 5, tabs.width, 1}, Rule);
+        Fill({left, footer - 5, bounds.width - 2 * inset, 1}, Rule);
         const auto footerLabel = category == Category::Sale
             ? Label(L"Shift + ЛКМ  Вернуть", "Shift + click  Return to inventory")
             : Label(L"ЛКМ  Использовать    Shift + ЛКМ  Отложить", "Click  Use    Shift + click  Set aside");
-        Text(left, footer, footerLabel, tabs.width, Bronze);
+        Text(left, footer, footerLabel, bounds.width - 2 * inset, Bronze);
         zrenderer->SetAlphaBlendSource(previousAlpha);
 
         oCItem::SetLightingSwell(FALSE);
@@ -774,21 +821,13 @@ public:
         }
         oCItem::SetLightingSwell(TRUE);
         zrenderer->SetAlphaBlendSource(zRND_ALPHA_SOURCE_MATERIAL);
-        const int marker = std::clamp(grid.size / 3, 13, 24);
         for (int slot = 0; slot < slots; ++slot) {
-            auto* item = Item(first + slot);
-            if (!item) continue;
-            const auto cell = grid.Cell(slot);
-            if (item->flags & ITM_FLAG_ACTIVE) DrawMarker(equippedMarker, cell.x + 2, cell.y + 2, marker);
-            if (MissingRequirements(*item)) DrawMarker(lockedMarker, cell.Right() - marker - 2, cell.y + 2, marker);
-            else if (ReadableDocument(*item) && !history.WasRead(item->GetInstance())) {
-                DrawMarker(unreadMarker, cell.Right() - marker - 2, cell.y + 2, marker);
-            }
+            if (auto* item = Item(first + slot)) DrawItemMarkers(*item, grid.Cell(slot));
         }
         zrenderer->SetAlphaBlendSource(previousAlpha);
         textView.DrawItems();
         if (quantity) DrawQuantity(point);
-        else if (dragging) DrawTooltip(nullptr, 0, std::nullopt);
+        else if (dragging || (point && DrawTabTooltip(tabs, *point))) DrawTooltip(nullptr, 0, std::nullopt);
         else DrawTooltip(Item(hover), Amount(hover), point);
     }
 };

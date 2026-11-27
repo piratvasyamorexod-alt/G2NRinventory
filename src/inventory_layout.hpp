@@ -11,8 +11,7 @@
 namespace InventoryLayout {
 
 inline constexpr int HotbarSlots = 10;
-enum class Category { Recent, All, Weapons, Armor, Ammo, Magic, Supplies, Documents, Other, Sale, Count };
-using CategoryWidths = std::array<int, static_cast<int>(Category::Count)>;
+enum class Category { Recent, All, Weapons, Armor, Ammo, Magic, Potions, Supplies, Documents, Other, Sale, Count };
 
 struct Box {
     int x = 0, y = 0, width = 0, height = 0;
@@ -50,27 +49,6 @@ inline bool DraggedEnough(int x, int y, int initialX, int initialY, int threshol
     return std::abs(x - initialX) >= threshold || std::abs(y - initialY) >= threshold;
 }
 
-inline Box CategoryTab(Box tabs, Category category) {
-    const int index = static_cast<int>(category);
-    constexpr int columns = 5;
-    const bool lower = index >= columns;
-    const int column = index % columns;
-    const int height = tabs.height / 2;
-    constexpr std::array<int, 6> top{0, 26, 44, 62, 80, 100}, bottom{0, 18, 37, 55, 74, 100};
-    const auto& stops = lower ? bottom : top;
-    const int left = tabs.x + stops[column] * tabs.width / 100;
-    return {left, tabs.y + (lower ? height : 0), tabs.x + stops[column + 1] * tabs.width / 100 - left, height};
-}
-
-inline std::optional<Category> CategoryAt(Box tabs, int x, int y) {
-    if (!tabs.Hit(x, y)) return std::nullopt;
-    for (int i = 0; i < static_cast<int>(Category::Count); ++i) {
-        const auto category = static_cast<Category>(i);
-        if (CategoryTab(tabs, category).Hit(x, y)) return category;
-    }
-    return std::nullopt;
-}
-
 struct FittedTabs {
     std::array<Box, static_cast<int>(Category::Count)> cells{};
     int height = 0;
@@ -81,37 +59,30 @@ struct FittedTabs {
         }
         return std::nullopt;
     }
+
+    void MoveBy(int dx, int dy) {
+        for (auto& cell : cells) {
+            cell.x += dx;
+            cell.y += dy;
+        }
+    }
 };
 
-inline int TwoRowTabWidth(const CategoryWidths& widths, bool hero) {
-    const int first = static_cast<int>(hero ? Category::Recent : Category::All);
-    const int split = static_cast<int>(Category::Magic);
-    const int end = static_cast<int>(hero ? Category::Count : Category::Sale);
-    int upper = 0, lower = 0;
-    for (int i = first; i < split; ++i) upper += widths[i];
-    for (int i = split; i < end; ++i) lower += widths[i];
-    return (std::max)(upper, lower);
-}
-
-inline FittedTabs FitCategoryTabs(int x, int width, int rowHeight, const CategoryWidths& widths, bool hero) {
+inline FittedTabs FitCategoryTabs(int width, int rowHeight, bool hero) {
     const int first = static_cast<int>(hero ? Category::Recent : Category::All);
     const int end = static_cast<int>(hero ? Category::Count : Category::Sale);
-    const int split = width >= TwoRowTabWidth(widths, hero) ? static_cast<int>(Category::Magic) : end;
+    const int count = end - first;
+    const int columns = std::clamp(width / rowHeight, 1, count);
+    const int rows = (count + columns - 1) / columns;
+    const int perRow = (count + rows - 1) / rows;
     FittedTabs tabs;
-    for (int start = first; start < end;) {
-        const int rowEnd = start < split ? split : end;
-        int next = start + 1, used = (std::min)(widths[start], width);
-        while (next < rowEnd && widths[next] <= width - used) used += widths[next++];
-        int left = x, spare = width - used;
-        for (int i = start; i < next; ++i) {
-            const int padding = spare / (next - i);
-            const int cellWidth = (std::min)(widths[i], width) + padding;
-            tabs.cells[i] = {left, tabs.height, cellWidth, rowHeight};
-            left += cellWidth;
-            spare -= padding;
+    for (int start = first; start < end; start += perRow) {
+        const int columnsHere = (std::min)(perRow, end - start);
+        for (int i = 0; i < columnsHere; ++i) {
+            const int left = width * i / columnsHere;
+            tabs.cells[start + i] = {left, tabs.height, width * (i + 1) / columnsHere - left, rowHeight};
         }
         tabs.height += rowHeight;
-        start = next;
     }
     return tabs;
 }

@@ -41,7 +41,6 @@ class TradePanel {
 
     InventoryPanel& ui;
     std::array<Side, 2> sides;
-    std::array<std::string, CategoryCount> tabNames;
     Box close, bulkButton, footer, card, confirm, cancel, number, slider;
     int currency = -1;
     std::int64_t wallet = 0;
@@ -234,18 +233,11 @@ public:
         const int gap = std::clamp(screen->psizey / 360, 2, 5);
         const int pad = std::clamp(screen->psizey / 80, 8, 20);
         const int target = std::clamp(screen->psizey / 15, 40, 108);
-        InventoryLayout::CategoryWidths labelWidths{};
-        for (int i = 0; i < CategoryCount; ++i) {
-            const auto& label = CategoryLabels[i];
-            tabNames[i] = ui.Label(label.ru, label.en);
-            labelWidths[i] = ui.Width(tabNames[i]) + (std::max)(8, h / 2);
-        }
-        const int preferredPane = (std::max)(InventoryLayout::TwoRowTabWidth(labelWidths, true),
-                                             13 * (target + gap) / 2);
+        const int preferredPane = 13 * (target + gap) / 2;
         const int width = (std::min)(screen->psizex * 94 / 100, 2 * preferredPane + 5 * pad);
         const int pane = (width - 5 * pad) / 2;
-        sides[0].tabs = InventoryLayout::FitCategoryTabs(0, pane, h + 5, labelWidths, false);
-        sides[1].tabs = InventoryLayout::FitCategoryTabs(0, pane, h + 5, labelWidths, true);
+        sides[0].tabs = InventoryLayout::FitCategoryTabs(pane, CategoryTabHeight(), false);
+        sides[1].tabs = InventoryLayout::FitCategoryTabs(pane, CategoryTabHeight(), true);
         const int tabsHeight = (std::max)(sides[0].tabs.height, sides[1].tabs.height);
         const int chrome = 4 * h + 4 * pad + tabsHeight + gap;
         auto grid = InventoryLayout::MakeGrid({0, 0, pane, screen->psizey * 78 / 100 - chrome}, target, gap);
@@ -258,10 +250,7 @@ public:
             grid.area.x = x + i * (pane + 3 * pad);
             grid.area.y = tabsTop + tabsHeight + gap;
             sides[i].grid = grid;
-            for (auto& cell : sides[i].tabs.cells) {
-                cell.x += grid.area.x;
-                cell.y += tabsTop;
-            }
+            sides[i].tabs.MoveBy(grid.area.x, tabsTop);
             sides[i].firstRow = std::clamp(sides[i].firstRow, 0, grid.LastRow(static_cast<int>(sides[i].items.size())));
             sides[i].scrollbar = {grid.area.Right() + 1, grid.area.y, pad, grid.area.height};
         }
@@ -487,19 +476,17 @@ public:
             const auto title = i == 0 ? std::string(dialog.NpcLeft->name[0].ToChar()) : ui.Label(L"Вещи героя", "Your items");
             ui.Text(side.grid.area.x, top + h + 5, title, side.grid.area.width, Bronze);
             ui.Fill({side.grid.area.x, side.grid.area.y - 2, side.grid.area.width, 1}, Rule);
-            for (int j = 0; j < CategoryCount; ++j) {
-                ui.DrawTab(side.tabs.cells[j], tabNames[j], static_cast<Category>(j) == side.category,
-                           side.counts[j] != 0, deal ? std::nullopt : point);
-            }
+            ui.DrawTabs(side.tabs, side.category, side.counts, deal ? std::nullopt : point);
             const int slots = side.grid.columns * side.grid.rows, first = side.firstRow * side.grid.columns;
             for (int slot = 0; slot < slots; ++slot) {
                 const auto cell = side.grid.Cell(slot);
                 const int index = first + slot;
                 const bool hot = hover && hover->side == i && hover->index == index;
                 const bool selected = keyboard && keyboard->side == i && keyboard->index == index && Item(*keyboard);
-                ui.Fill(cell, 0xFF1D2018);
-                ui.Frame(cell, hot ? Bright : selected ? Bronze : Rule);
                 const auto* entry = Item({i, index});
+                const bool equipped = entry && (entry->item->flags & ITM_FLAG_ACTIVE);
+                ui.Fill(cell, equipped ? 0xFF292D1E : 0xFF1D2018);
+                ui.Frame(cell, hot ? Bright : selected ? Bronze : Rule);
                 if (entry && entry->entry.quantity > 1) ui.Text(cell.x + 3, cell.Bottom() - h,
                     std::to_string(entry->entry.quantity), cell.width - 7, Bright, true);
             }
@@ -522,10 +509,23 @@ public:
                 const auto cell = side.grid.Cell(slot);
                 Place(ui.preview, {cell.x + 3, cell.y + 4, cell.width - 6, cell.height - 9});
                 entry->item->RenderItem(Container(dialog, i)->rndWorld, &ui.preview, 0.0f);
-                if (!entry->item->GetVisual()) ui.Text(cell.x + 3, cell.y + 4, entry->item->name.ToChar(), cell.width - 7);
+                if (!entry->item->GetVisual()) {
+                    const int labelWidth = cell.width - 10 - (entry->entry.quantity > 1
+                        ? ui.Width(std::to_string(entry->entry.quantity)) : 0);
+                    ui.Text(cell.x + 4, cell.Bottom() - h, entry->item->name.ToChar(), labelWidth);
+                }
             }
         }
         oCItem::SetLightingSwell(TRUE);
+        zrenderer->SetAlphaBlendSource(zRND_ALPHA_SOURCE_MATERIAL);
+        for (int i = 0; i < 2; ++i) {
+            const auto& side = sides[i];
+            const int slots = side.grid.columns * side.grid.rows, first = side.firstRow * side.grid.columns;
+            for (int slot = 0; slot < slots; ++slot) {
+                if (const auto* entry = Item({i, first + slot})) ui.DrawItemMarkers(*entry->item, side.grid.Cell(slot));
+            }
+        }
+        zrenderer->SetAlphaBlendSource(alpha);
         if (deal) {
             zrenderer->SetAlphaBlendSource(zRND_ALPHA_SOURCE_MATERIAL);
             ui.textView.DrawItems();
@@ -540,7 +540,10 @@ public:
                 : (hover->side == 0 ? ui.Label(L"Покупка за штуку", "Buy per item") : ui.Label(L"Продажа за штуку", "Sell per item"))
                     + "  " + std::to_string(entry->price);
             ui.DrawTooltip(entry->item, entry->entry.quantity, point, price);
-        } else ui.DrawTooltip(nullptr, 0, std::nullopt);
+        } else {
+            ui.DrawTooltip(nullptr, 0, std::nullopt);
+            if (point && !deal && !ui.DrawTabTooltip(sides[0].tabs, *point)) ui.DrawTabTooltip(sides[1].tabs, *point);
+        }
         ui.DrawCursor(point);
     }
 };
