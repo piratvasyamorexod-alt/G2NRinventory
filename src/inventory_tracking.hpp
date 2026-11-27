@@ -13,26 +13,14 @@ int DocumentInstance(oCItem* item) {
     return item && ReadableDocument(*item) ? item->GetInstance() : -1;
 }
 
-std::filesystem::path FindSaveFolder(oCSavegameManager* manager, int slot) {
-    if (!zoptions || !manager || slot < 0) return {};
-    const auto slotName = manager->GetSlotDirName(slot);
-    auto* info = manager->GetSavegame(slot);
-    const std::array<std::filesystem::path, 2> names{info ? info->m_Dir.ToChar() : "", slotName.ToChar()};
-    const auto* optionPath = zoptions->GetDirString(DIR_SAVEGAMES).ToChar();
-    auto* nativeDirectory = zoptions->GetDir(DIR_SAVEGAMES);
-    const auto nativePath = nativeDirectory ? nativeDirectory->GetDir() : zSTRING();
-    std::error_code error;
-    const auto current = std::filesystem::current_path(error);
-    const std::array<std::filesystem::path, 3> roots{optionPath, nativePath.ToChar(), current};
-    for (const auto& root : roots) {
-        if (root.empty()) continue;
-        for (const auto& name : names) {
-            if (name.empty()) continue;
-            const auto folder = root / name;
-            if (std::filesystem::is_regular_file(folder / L"SAVEHDR.SAV", error)) return folder;
-        }
-    }
-    return {};
+constexpr auto InventorySaveFile = L"G2NRINVENTORY.SAV";
+
+std::filesystem::path CurrentSaveFolder(oCSavegameManager* manager) {
+    if (!zoptions || !manager) return {};
+    const auto& root = zoptions->GetDirString(DIR_SAVEGAMES);
+    const auto currentSlot = manager->GetSlotDirName(-1);
+    if (root.IsEmpty() || currentSlot.IsEmpty()) return {};
+    return std::filesystem::path(root.ToChar()) / currentSlot.ToChar();
 }
 
 bool ReadHistory(const std::filesystem::path& path) {
@@ -67,52 +55,19 @@ bool WriteHistory(const std::filesystem::path& path) {
     return true;
 }
 
-void SaveInventoryFor(oCSavegameManager* manager, int slot) {
-    const auto directory = FindSaveFolder(manager, slot);
-    if (!directory.empty() && WriteHistory(directory / L"G2NRINVENTORY.SAV")) return;
-    OutputDebugStringW(L"G2NRinventory: could not save inventory data to the game slot.\n");
-}
+void __fastcall SaveInventoryWithSlot(oCSavegameManager*, void*, int);
+auto SaveInventoryWithSlotHook = Union::CreateHook(
+    SIGNATURE_OF(&oCSavegameManager::CopyFromCurrent), &SaveInventoryWithSlot, Union::HookType::Hook_Detours);
 
-void LoadInventoryFor(oCSavegameManager* manager, int slot) {
-    history = {};
-    const auto directory = FindSaveFolder(manager, slot);
-    if (directory.empty()) return;
-    if (!ReadHistory(directory / L"G2NRINVENTORY.SAV")) ReadHistory(directory / L"G2NRinventory.dat");
-}
-
-bool managerSaving = false, managerLoading = false;
-
-void __fastcall SaveFromManager(CGameManager*, void*, int);
-auto SaveManagerHook = Union::CreateHook(
-    SIGNATURE_OF(&CGameManager::Write_Savegame), &SaveFromManager, Union::HookType::Hook_Detours);
-
-void __fastcall SaveFromManager(CGameManager* manager, void* edx, int slot) {
-    const bool previous = std::exchange(managerSaving, true);
-    SaveManagerHook(manager, edx, slot);
-    managerSaving = previous;
-    if (!previous && slot >= 0 && player) SaveInventoryFor(manager->savegameManager, slot);
-}
-
-void __fastcall SaveHistory(oCGame*, void*, int, int);
-auto SaveHistoryHook = Union::CreateHook(
-    SIGNATURE_OF(&oCGame::WriteSavegame), &SaveHistory, Union::HookType::Hook_Detours);
-
-void __fastcall SaveHistory(oCGame* game, void* edx, int slot, int globals) {
-    SaveHistoryHook(game, edx, slot, globals);
-    if (!managerSaving && globals && slot >= 0 && player) SaveInventoryFor(game->savegameManager, slot);
-}
-
-void __fastcall LoadFromManager(CGameManager*, void*, int);
-auto LoadManagerHook = Union::CreateHook(
-    SIGNATURE_OF(&CGameManager::Read_Savegame), &LoadFromManager, Union::HookType::Hook_Detours);
-
-void __fastcall LoadFromManager(CGameManager* manager, void* edx, int slot) {
-    const bool previous = std::exchange(managerLoading, true);
-    const bool wasTrackingPaused = std::exchange(trackingPaused, true);
-    LoadManagerHook(manager, edx, slot);
-    trackingPaused = wasTrackingPaused;
-    managerLoading = previous;
-    if (!previous && slot >= 0 && player) LoadInventoryFor(manager->savegameManager, slot);
+void __fastcall SaveInventoryWithSlot(oCSavegameManager* manager, void* edx, int slot) {
+    if (slot >= 0) {
+        // Gothic copies the working save directory to the chosen slot here.
+        const auto directory = CurrentSaveFolder(manager);
+        if (directory.empty() || !WriteHistory(directory / InventorySaveFile)) {
+            OutputDebugStringW(L"G2NRinventory: could not write the inventory file before copying the save slot.\n");
+        }
+    }
+    SaveInventoryWithSlotHook(manager, edx, slot);
 }
 
 void __fastcall LoadHistory(oCGame*, void*, int, int);
@@ -123,7 +78,14 @@ void __fastcall LoadHistory(oCGame* game, void* edx, int slot, int globals) {
     const bool previous = std::exchange(trackingPaused, true);
     LoadHistoryHook(game, edx, slot, globals);
     trackingPaused = previous;
-    if (!managerLoading && globals && slot >= 0 && player) LoadInventoryFor(game->savegameManager, slot);
+    if (slot < 0 || !globals || !player) return;
+
+    // A full load has copied the selected slot back into the working directory.
+    history = {};
+    const auto directory = CurrentSaveFolder(game->savegameManager);
+    if (!directory.empty() && !ReadHistory(directory / InventorySaveFile)) {
+        ReadHistory(directory / L"G2NRinventory.dat");
+    }
 }
 
 void __fastcall NewGame(oCGame*, void*, int, const zSTRING&);
