@@ -34,6 +34,9 @@ def make_badge(kind, rim, highlight):
         polygon([(16, 7), (27, 16), (16, 25), (5, 16)], highlight)
         line([(16, 11), (16, 17)], "#302415", 3)
         polygon([(15, 19), (17, 19), (17, 21), (15, 21)], "#302415")
+    elif kind == "UPGRADE":
+        polygon([(16, 7), (25, 16), (20, 16), (20, 24),
+                 (12, 24), (12, 16), (7, 16)], highlight)
     elif kind in ("UNREAD", "READ"):
         polygon([(8, 10), (12, 10), (16, 12), (20, 10), (24, 10), (24, 21),
                  (20, 21), (16, 23), (12, 21), (8, 21)], highlight)
@@ -169,6 +172,7 @@ if __name__ == "__main__":
         ("READ", "#708054", "#e8c58c"),
         ("EQUIPPED", "#708054", "#c1d297"),
         ("QUEST", "#9f7442", "#d4af72"),
+        ("UPGRADE", "#708054", "#b7c98e"),
     ):
         write_texture(kind, make_badge(kind, rim, highlight))
     for kind in ("RECENT", "ALL", "WEAPONS", "ARMOR", "AMMO", "MAGIC", "POTIONS", "SUPPLIES", "DOCUMENTS", "OTHER", "SALE"):

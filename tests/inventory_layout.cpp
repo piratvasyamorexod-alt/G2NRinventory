@@ -195,4 +195,13 @@ int main() {
     assert(InventoryTrade::Affordable(10, 9, 8) == 0);
     assert(InventoryTrade::Affordable(3, 9, INT_MAX) == 3);
     assert(InventoryTrade::Affordable(10, 0, 0) == 10);
+
+    const int wornArmor[]{0, 30, 30, 5, 0, 0, 20, 0};
+    const int tiesArmor[]{0, 25, 25, 5, 0, 15, 15, 0};
+    const int betterArmor[]{0, 25, 25, 5, 0, 16, 15, 0};
+    const int largeProtection[]{INT_MAX, INT_MAX};
+    assert(InventoryTrade::ProtectionTotal(wornArmor) == 85);
+    assert(InventoryTrade::ProtectionTotal(tiesArmor) == InventoryTrade::ProtectionTotal(wornArmor));
+    assert(InventoryTrade::ProtectionTotal(betterArmor) > InventoryTrade::ProtectionTotal(wornArmor));
+    assert(InventoryTrade::ProtectionTotal(largeProtection) == std::int64_t{INT_MAX} * 2);
 }

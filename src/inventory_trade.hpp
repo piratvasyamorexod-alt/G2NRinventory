@@ -16,7 +16,7 @@ oCViewDialogTrade* ActiveTrade() {
 }
 
 class TradePanel {
-    struct Slot { oCItem* item; int price; Entry entry; };
+    struct Slot { oCItem* item; int price; Entry entry; bool upgrade; };
     struct Lot { oCItem* item; int instance, amount, price; };
     struct Side {
         Grid grid;
@@ -40,6 +40,7 @@ class TradePanel {
     };
 
     InventoryPanel& ui;
+    zCView upgradeMarker{0, 0, 8, 8};
     std::array<Side, 2> sides;
     Box close, bulkButton, footer, card, confirm, cancel, number, slider;
     int currency = -1;
@@ -216,6 +217,7 @@ public:
 
     bool Open() {
         currency = oCItemContainer::GetCurrencyInstance();
+        InitSprite(upgradeMarker, "G2NRI_UPGRADE.TGA");
         return ui.Ready() && currency >= 0;
     }
 
@@ -265,6 +267,21 @@ public:
     void Refresh(oCViewDialogTrade& dialog) {
         marked.clear();
         wallet = 0;
+        const auto equippedDamage = [](oCItem* item) -> std::optional<int> {
+            return item ? std::optional{WeaponDamage(*item)} : std::nullopt;
+        };
+        const auto melee = equippedDamage(dialog.NpcRight->GetEquippedMeleeWeapon());
+        const auto ranged = equippedDamage(dialog.NpcRight->GetEquippedRangedWeapon());
+        const auto* armor = dialog.NpcRight->GetEquippedArmor();
+        const auto armorTotal = armor ? std::optional{InventoryTrade::ProtectionTotal(armor->protection)} : std::nullopt;
+        const auto isUpgrade = [&](const oCItem& item, Category category, int damage) {
+            if (category == Category::Weapons) {
+                const auto& equipped = item.mainflag & ITM_CAT_NF ? melee : ranged;
+                return equipped && damage > *equipped;
+            }
+            return category == Category::Armor && !(item.flags & ITM_FLAG_SHIELD) && armorTotal
+                && InventoryTrade::ProtectionTotal(item.protection) > *armorTotal;
+        };
         std::map<int, int> reserved;
         std::array<bool, InventoryHistory::History::MaximumRecent> recentSeen{};
         bool cyrillic = false;
@@ -310,7 +327,7 @@ public:
                 const int amount = side.category == Category::Sale ? held : matches ? available : 0;
                 if (amount > 0) {
                     const int damage = kind == Category::Weapons ? WeaponDamage(*item) : 0;
-                    side.items.push_back({item, price, {0, kind, damage, rank, amount}});
+                    side.items.push_back({item, price, {0, kind, damage, rank, amount}, !hero && isUpgrade(*item, kind, damage)});
                 }
             }
             std::stable_sort(side.items.begin(), side.items.end(), [&](const Slot& a, const Slot& b) {
@@ -512,7 +529,9 @@ public:
             const auto& side = sides[i];
             const int slots = side.grid.columns * side.grid.rows, first = side.firstRow * side.grid.columns;
             for (int slot = 0; slot < slots; ++slot) {
-                if (const auto* entry = Item({i, first + slot})) ui.DrawItemMarkers(*entry->item, side.grid.Cell(slot));
+                if (const auto* entry = Item({i, first + slot})) {
+                    ui.DrawItemMarkers(*entry->item, side.grid.Cell(slot), entry->upgrade ? &upgradeMarker : nullptr);
+                }
             }
         }
         zrenderer->SetAlphaBlendSource(alpha);

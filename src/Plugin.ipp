@@ -134,7 +134,11 @@ constexpr std::array<const char*, CategoryCount> CategoryTextures{
     "G2NRI_TAB_DOCUMENTS.TGA", "G2NRI_TAB_OTHER.TGA", "G2NRI_TAB_SALE.TGA"
 };
 
-Category lastInventoryCategory = Category::Recent;
+struct InventoryPosition {
+    Category category = Category::Recent;
+    int firstRow = 0;
+};
+InventoryPosition lastInventoryPosition;
 
 int CategoryTabHeight() { return std::clamp(screen->psizey / 32, 26, 40); }
 
@@ -161,8 +165,8 @@ class InventoryPanel {
     std::vector<Entry> entries;
     std::vector<oCItem*> nativeItems;
     std::array<int, CategoryCount> counts{};
-    Category category = lastInventoryCategory;
-    int inset = 0, lineHeight = 0, firstRow = 0;
+    Category category = lastInventoryPosition.category;
+    int inset = 0, lineHeight = 0, firstRow = lastInventoryPosition.firstRow;
     int selected = -1;
     oCItem* selectedItem = nullptr;
     int selectedInstance = -1;
@@ -276,9 +280,15 @@ class InventoryPanel {
              cell.width - 10 - amountSpace - badgeSpace);
     }
 
-    void DrawItemMarkers(oCItem& item, Box cell) {
+    void DrawItemMarkers(oCItem& item, Box cell, zCView* upgrade = nullptr) {
         const int size = MarkerSize(cell);
-        if (item.flags & ITM_FLAG_ACTIVE) DrawMarker(equippedMarker, cell.x + 2, cell.y + 2, size);
+        const bool equipped = (item.flags & ITM_FLAG_ACTIVE) != 0;
+        if (equipped) DrawMarker(equippedMarker, cell.x + 2, cell.y + 2, size);
+        if (upgrade) {
+            const int x = cell.x + (equipped ? size + 3 : 2);
+            const int arrowSize = equipped ? (std::min)(size, cell.width - 2 * size - 5) : size;
+            if (arrowSize > 0) DrawMarker(*upgrade, x, cell.y + 2, arrowSize);
+        }
         if (MissingRequirements(item)) DrawMarker(lockedMarker, cell.Right() - size - 2, cell.y + 2, size);
         else if (ReadableDocument(item)) {
             auto& marker = history.WasRead(item.GetInstance()) ? readMarker : unreadMarker;
@@ -687,7 +697,7 @@ public:
             });
             if (it != entries.end()) match = static_cast<int>(it - entries.begin());
         }
-        SetSelection(match >= 0 ? match : selected, false);
+        SetSelection(match >= 0 ? match : selected >= 0 ? selected : firstRow * grid.columns, false);
         if (useSelection) SelectNative(inv);
         if (quantity) {
             const auto it = std::find_if(entries.begin(), entries.end(), [&](const Entry& entry) {
@@ -706,13 +716,15 @@ public:
     void ChangeCategory(int delta, oCNpcInventory& inv) {
         const int next = (static_cast<int>(category) + delta + CategoryCount) % CategoryCount;
         if (next == static_cast<int>(category)) return;
-        category = lastInventoryCategory = static_cast<Category>(next);
+        category = static_cast<Category>(next);
         firstRow = tooltipTop = 0;
         selected = -1;
         selectedItem = nullptr;
         useSelection = true;
         Refresh(inv);
     }
+
+    void RememberPosition() const { lastInventoryPosition = {category, firstRow}; }
 
     void MoveSelection(int dx, int dy, oCNpcInventory& inv) {
         useSelection = true;
@@ -1055,7 +1067,9 @@ bool InventoryAvailable() {
 
 void CloseSession(bool reacquire = true) {
     std::unique_ptr<InventorySession> closing(std::exchange(session, nullptr));
-    if (closing) closing->StopMouse(reacquire);
+    if (!closing) return;
+    if (!closing->dialog) closing->panel.RememberPosition();
+    closing->StopMouse(reacquire);
 }
 
 HotbarPanel& GetHotbar() {

@@ -3,9 +3,17 @@
 #include <algorithm>
 #include <climits>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
+#include <numeric>
 
 namespace InventoryTrade {
+
+template<std::size_t Count>
+inline std::int64_t ProtectionTotal(const int (&protection)[Count]) {
+    // Both averages have the same denominator, so compare their sums exactly.
+    return std::accumulate(protection, protection + Count, std::int64_t{0});
+}
 
 inline int SalePrice(int value, float multiplier) {
     if (value <= 0 || !std::isfinite(multiplier) || multiplier < 0) return 0;
