@@ -1,6 +1,7 @@
 #pragma once
 
 InventoryHistory::History history;
+void InvalidateArmorAppearance();
 bool trackingPaused = false;
 bool usingItemState = false;
 int directDocument = -1;
@@ -148,6 +149,7 @@ void SaveInventory(oCSavegameManager* manager, int slot) {
 
 void RestoreInventory(oCSavegameManager* manager, int slot) {
     history = {};
+    InvalidateArmorAppearance();
     const auto directory = InventorySaveFolder(manager, slot);
     if (directory.empty()) {
         LogInventorySave("load", slot, "no directory");
@@ -234,6 +236,7 @@ auto NewGameHook = Union::CreateHook(
 
 void __fastcall NewGame(oCGame* game, void* edx, int slot, const zSTRING& world) {
     history = {};
+    InvalidateArmorAppearance();
     NewGameHook(game, edx, slot, world);
 }
 

@@ -4,8 +4,10 @@
 
 #include <algorithm>
 #include <array>
+#include <iomanip>
 #include <istream>
 #include <map>
+#include <optional>
 #include <ostream>
 #include <set>
 #include <sstream>
@@ -14,17 +16,27 @@
 
 namespace InventoryHistory {
 
+struct ArmorLook {
+    // An empty mesh means the hero's normal body, independent of equipped armor.
+    std::string mesh;
+    int texture = 0;
+};
+
 class History {
     std::vector<int> recent;
     std::set<int> readDocuments;
     std::map<int, int> sale;
     std::array<int, InventoryLayout::HotbarSlots> hotbar;
+    std::optional<ArmorLook> armorLook;
 
 public:
     static constexpr int MaximumRecent = 64;
     History() { hotbar.fill(-1); }
 
     const auto& Hotbar() const { return hotbar; }
+    const auto& GetArmorLook() const { return armorLook; }
+
+    void SetArmorLook(std::optional<ArmorLook> appearance) { armorLook = std::move(appearance); }
 
     bool HasHotbar() const {
         return std::any_of(hotbar.begin(), hotbar.end(), [](int instance) { return instance >= 0; });
@@ -86,13 +98,25 @@ public:
         readDocuments.clear();
         sale.clear();
         hotbar.fill(-1);
+        armorLook.reset();
         std::string line;
         if (!std::getline(input, line) || (line != "G2NRinventory 1" && line != "G2NRinventory 2")) return false;
         while (std::getline(input, line)) {
             std::istringstream record(line);
             char kind;
+            if (!(record >> kind)) continue;
+            if (kind == 'A') {
+                ArmorLook look;
+                if (record >> look.texture >> std::quoted(look.mesh) && (record >> std::ws).eof()
+                    && look.mesh.size() < 260 && look.mesh.find_first_of(":\r\n") == std::string::npos
+                    && look.mesh.find("..") == std::string::npos
+                    && (look.mesh.empty() || (look.mesh.front() != '/' && look.mesh.front() != '\\'))) {
+                    armorLook = std::move(look);
+                }
+                continue;
+            }
             std::string name;
-            if (!(record >> kind >> name)) continue;
+            if (!(record >> name)) continue;
             if (kind == 'R') Acquire(resolve(name));
             if (kind == 'D') MarkRead(resolve(name));
             int quantity;
@@ -109,6 +133,7 @@ public:
     template<class Resolve>
     void Save(std::ostream& output, Resolve resolve) const {
         output << "G2NRinventory 2\n";
+        if (armorLook) output << "A " << armorLook->texture << ' ' << std::quoted(armorLook->mesh) << '\n';
         const auto write = [&](char kind, int instance) {
             const auto name = resolve(instance);
             if (!name.empty()) output << kind << ' ' << name << '\n';

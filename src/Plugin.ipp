@@ -10,6 +10,7 @@
 #include <climits>
 #include <filesystem>
 #include <fstream>
+#include <intrin.h>
 #include <iterator>
 #include <map>
 #include <memory>
@@ -33,6 +34,7 @@ constexpr unsigned long Missing = 0xFFFFB797;
 constexpr int CategoryCount = static_cast<int>(Category::Count);
 
 #include "inventory_tracking.hpp"
+#include "inventory_armor.hpp"
 
 Category Classify(const oCItem& item) {
     if (item.flags & ITM_FLAG_SHIELD) return Category::Armor;
@@ -160,7 +162,7 @@ InventoryPosition lastInventoryPosition;
 
 int CategoryTabHeight() { return std::clamp(screen->psizey / 32, 26, 40); }
 
-enum class Command { None, Use, Close };
+enum class Command { None, Use, Close, ArmorFull, ArmorOnly, ArmorSkin };
 
 class InventoryPanel {
     friend class TradePanel;
@@ -200,6 +202,73 @@ class InventoryPanel {
         std::string digits;
     };
     std::optional<QuantityEdit> quantity;
+
+    struct ArmorMenu {
+        POINT anchor;
+        oCItem* item;
+        int instance;
+    };
+    std::optional<ArmorMenu> armorMenu;
+
+    using ArmorLabels = std::array<std::string, 3>;
+
+    ArmorLabels ArmorOptions() const {
+        return {Label(L"Надеть полностью", "Equip normally"), Label(L"Надеть как броню", "Equip as armor"),
+                Label(L"Надеть как скин", "Use as appearance")};
+    }
+
+    Box ArmorMenuBounds(const ArmorLabels& options) const {
+        constexpr int pad = 8;
+        int width = 0;
+        for (const auto& option : options) width = (std::max)(width, Width(option) + 4 * pad);
+        const int bottom = InventoryLayout::PlaceHotbar(screen->psizex, screen->psizey).bounds.y;
+        const Box viewport{2, 2, screen->psizex - 4, bottom - 4};
+        return InventoryLayout::PlaceTooltip(viewport, armorMenu->anchor.x, armorMenu->anchor.y,
+            (std::min)(width, viewport.width),
+            (std::min)(viewport.height, 2 * pad + static_cast<int>(options.size()) * (lineHeight + 4)), 12);
+    }
+
+    Box ArmorMenuRow(Box menu, int index) const {
+        const int height = lineHeight + 4;
+        return {menu.x + 4, menu.y + 8 + index * height, menu.width - 8, height};
+    }
+
+    bool ArmorOptionEnabled(int index) const {
+        return index != 2 || !armorMenu->item->visual_change.IsEmpty();
+    }
+
+    void DrawArmorMenu(std::optional<POINT> point) {
+        const auto labels = ArmorOptions();
+        const auto menu = ArmorMenuBounds(labels);
+        Place(tooltipText, menu);
+        tooltipText.ClrPrintwin();
+        const auto alpha = zrenderer->GetAlphaBlendSource();
+        zrenderer->SetAlphaBlendSource(zRND_ALPHA_SOURCE_MATERIAL);
+        Fill(menu, 0xFF202318);
+        Frame(menu, Rule);
+        for (int i = 0; i < static_cast<int>(labels.size()); ++i) {
+            const auto row = ArmorMenuRow(menu, i);
+            const bool enabled = ArmorOptionEnabled(i);
+            const bool hovered = enabled && point && row.Hit(point->x, point->y);
+            if (hovered) Fill(row, 0xFF35351F);
+            DrawText(tooltipText, row.x + 8, row.y + 2, labels[i], row.width - 16,
+                hovered ? Bright : enabled ? Paper : Rule);
+        }
+        zrenderer->SetAlphaBlendSource(alpha);
+        tooltipText.DrawItems();
+    }
+
+    Command ClickArmorMenu(POINT point) {
+        constexpr std::array actions{Command::ArmorFull, Command::ArmorOnly, Command::ArmorSkin};
+        const auto menu = ArmorMenuBounds(ArmorOptions());
+        auto result = Command::None;
+        for (int i = 0; i < static_cast<int>(actions.size()); ++i) {
+            const auto row = ArmorMenuRow(menu, i);
+            if (row.Hit(point.x, point.y) && ArmorOptionEnabled(i)) result = actions[i];
+        }
+        armorMenu.reset();
+        return result;
+    }
 
     struct QuantityBoxes { Box card, number, slider, confirm, cancel; };
 
@@ -610,10 +679,13 @@ public:
     int Amount(int index) const { return Item(index) ? entries[index].quantity : 0; }
 
     oCItem* PressSource(POINT point) const {
-        return quantity || category == Category::Sale ? nullptr : Item(ItemAt(point));
+        return armorMenu || quantity || category == Category::Sale ? nullptr : Item(ItemAt(point));
     }
 
     bool IsPickingQuantity() const { return quantity.has_value(); }
+    bool IsArmorMenuOpen() const { return armorMenu.has_value(); }
+    void CancelArmorMenu() { armorMenu.reset(); }
+    oCItem* SelectedItem() const { return Item(selected); }
 
     bool SelectNative(oCNpcInventory& inv) const {
         if (category == Category::Sale || quantity || !Item(selected)) return false;
@@ -708,6 +780,9 @@ public:
             if (it != entries.end()) match = static_cast<int>(it - entries.begin());
         }
         SetSelection(match >= 0 ? match : selected >= 0 ? selected : firstRow * grid.columns, false);
+        if (armorMenu && (Item(selected) != armorMenu->item || armorMenu->item->GetInstance() != armorMenu->instance)) {
+            armorMenu.reset();
+        }
         if (useSelection) SelectNative(inv);
         if (quantity) {
             const auto it = std::find_if(entries.begin(), entries.end(), [&](const Entry& entry) {
@@ -743,7 +818,7 @@ public:
     }
 
     void Scroll(POINT p, int wheel) {
-        if (quantity || !wheel || !bounds.Hit(p.x, p.y)) return;
+        if (armorMenu || quantity || !wheel || !bounds.Hit(p.x, p.y)) return;
         if (tooltipMaxTop > 0 && (GetKeyState(VK_SHIFT) & 0x8000)) {
             auto* item = Item(ItemAt(p));
             if (item && item == tooltipItem && item->GetInstance() == tooltipInstance) {
@@ -771,6 +846,7 @@ public:
     }
 
     Command Click(POINT p, bool shift, oCNpcInventory& inv) {
+        if (armorMenu) return ClickArmorMenu(p);
         if (quantity) {
             const auto [card, number, slider, confirm, cancel] = QuantityLayout();
             if (confirm.Hit(p.x, p.y)) ConfirmQuantity();
@@ -801,7 +877,13 @@ public:
         useSelection = true;
         SetSelection(index, false);
         const bool returning = category == Category::Sale;
-        if (!shift) return returning ? Command::None : Command::Use;
+        if (!shift) {
+            if (returning) return Command::None;
+            if (!IsBodyArmor(*item)) return Command::Use;
+            armorMenu.emplace(ArmorMenu{p, item, item->GetInstance()});
+            inv.SetHandleEventTop();
+            return Command::None;
+        }
         if (item->flags & ITM_FLAG_ACTIVE) return Command::None;
         const int instance = item->GetInstance(), amount = Amount(index);
         if (amount == 1) MoveToSale(instance, amount, returning);
@@ -823,7 +905,7 @@ public:
         const int left = bounds.x + inset;
         Text(left, close.y, Label(L"ИНВЕНТАРЬ", "INVENTORY"), close.x - left, Bronze);
         Text(close.x, close.y, "Esc", close.width, point && close.Hit(point->x, point->y) ? Bright : Bronze, true);
-        DrawTabs(tabs, category, counts, quantity || dragging ? std::nullopt : point);
+        DrawTabs(tabs, category, counts, armorMenu || quantity || dragging ? std::nullopt : point);
         Fill({left, grid.area.y - 3, bounds.width - 2 * inset, 1}, Rule);
         const int first = firstRow * grid.columns, slots = grid.columns * grid.rows;
         for (int slot = 0; slot < slots; ++slot) {
@@ -871,7 +953,8 @@ public:
         }
         zrenderer->SetAlphaBlendSource(previousAlpha);
         textView.DrawItems();
-        if (quantity) DrawQuantity(point);
+        if (armorMenu) DrawArmorMenu(point);
+        else if (quantity) DrawQuantity(point);
         else if (dragging || (point && DrawTabTooltip(tabs, *point))) DrawTooltip(nullptr, 0, std::nullopt);
         else DrawTooltip(Item(hover), Amount(hover), point);
     }
@@ -1006,6 +1089,10 @@ public:
         const auto input = events.Take();
         if (const auto right = ClickPoint(input.rightClick, VK_RBUTTON, rightHeld)) {
             if (std::exchange(pressedItem, std::nullopt)) return Command::None;
+            if (panel.IsArmorMenuOpen()) {
+                panel.CancelArmorMenu();
+                return Command::None;
+            }
             if (!panel.IsPickingQuantity()) {
                 const int slot = InventoryLayout::PlaceHotbar(screen->psizex, screen->psizey).Hit(right->x, right->y);
                 if (slot >= 0) {
@@ -1025,8 +1112,10 @@ public:
         const auto pointer = listening && released ? ScreenPoint(input.leftRelease) : point;
         panel.DragQuantity(point, held);
         if (click || (pressedItem && released) || (wheel && input.wheel)) {
+            const bool wasChoosingArmor = panel.IsArmorMenuOpen();
             panel.Layout();
             panel.Refresh(inv);
+            if (wasChoosingArmor && !panel.IsArmorMenuOpen()) return Command::None;
         }
         const bool shift = input.leftClick ? input.leftShift : (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
         if (click) {
@@ -1220,6 +1309,10 @@ int __fastcall InventoryKey(oCNpcInventory* inv, void* edx, int key) {
     if (IsLootInput(inv)) return HandleLootKey(key);
     if (!session || session->trade.Pair().other || !PersonalInventory(inv) || !zinput) return KeyHook(inv, edx, key);
     auto& panel = session->panel;
+    if (panel.IsArmorMenuOpen()) {
+        if (key == KEY_ESCAPE || zinput->GetFirstBindedLogicalKey(key) == zLOGICKEY_INVENTORY) panel.CancelArmorMenu();
+        return TRUE;
+    }
     if (panel.QuantityKey(key, *inv)) return TRUE;
     const auto logical = zinput->GetFirstBindedLogicalKey(key);
     if (key == KEY_ESCAPE) {
@@ -1372,6 +1465,7 @@ void __cdecl PollInventory() {
     for (int i = 0; i < HotbarSlots; ++i) if (!(GetAsyncKeyState(VK_F1 + i) & 0x8000)) functionHeld[i] = false;
     PollHook();
     if (!InventoryAvailable()) return;
+    SyncArmorAppearance();
     const auto pair = CurrentInventoryPair();
     if (pair.other) {
         if (!PreparePairSession(pair)) return;
@@ -1402,7 +1496,14 @@ void __cdecl PollInventory() {
     }
     const auto result = session->Poll(inv);
     if (result == Command::Close) player->CloseInventory();
-    if (result == Command::Use) UseSelected(inv);
+    else if (result == Command::Use) UseSelected(inv);
+    else if (result != Command::None) {
+        if (auto* armor = session->panel.SelectedItem()) {
+            const auto action = result == Command::ArmorFull ? ArmorAction::Full
+                : result == Command::ArmorOnly ? ArmorAction::Armor : ArmorAction::Skin;
+            ApplyArmorAction(*player, *armor, action);
+        }
+    }
 }
 
 } // namespace

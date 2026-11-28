@@ -74,6 +74,19 @@ int main() {
     std::istringstream legacyRecent("G2NRinventory 2\nR LEGACY_DOCUMENT\nS LEGACY_DOCUMENT 1\n");
     loaded.Load(legacyRecent, [](const std::string&) { return 6; });
     assert(loaded.Rank(6) == 0 && !loaded.WasRead(5) && !loaded.WasRead(6) && loaded.ForSale(6) == 1);
+    assert(!loaded.GetArmorLook());
+    history.SetArmorLook(InventoryHistory::ArmorLook{"HUMAN Body Armor", 2});
+    std::stringstream withArmorLook;
+    history.Save(withArmorLook, [](int instance) { return "IT_TEST_" + std::to_string(instance); });
+    assert(loaded.Load(withArmorLook, [](const std::string&) { return 6; }));
+    assert(loaded.GetArmorLook() && loaded.GetArmorLook()->mesh == "HUMAN Body Armor"
+        && loaded.GetArmorLook()->texture == 2 && loaded.HasHotbar());
+    std::istringstream baseBody("G2NRinventory 2\nA 0 \"\"\nA 0 \"..\\\\invalid\"\n");
+    assert(loaded.Load(baseBody, [](const std::string&) { return -1; }));
+    assert(loaded.GetArmorLook() && loaded.GetArmorLook()->mesh.empty());
+    std::istringstream noAppearance("G2NRinventory 2\n");
+    assert(loaded.Load(noAppearance, [](const std::string&) { return -1; }));
+    assert(!loaded.GetArmorLook());
     for (int index = 100; index < 200; ++index) history.Acquire(index);
     assert(history.Recent().size() == InventoryHistory::History::MaximumRecent);
     assert(history.Rank(20) == -1 && history.Rank(199) == 0 && history.WasRead(20));
