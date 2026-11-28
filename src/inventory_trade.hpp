@@ -50,7 +50,7 @@ class TradePanel {
     std::string status;
 
     int SellPrice(oCViewDialogTrade& dialog, oCItem& item) const {
-        if (item.GetInstance() == currency || !CanMoveSaleItem(item, false)) return 0;
+        if (item.GetInstance() == currency || (item.flags & ITM_FLAG_ACTIVE)) return 0;
         return InventoryTrade::SalePrice(item.GetValue(), dialog.DlgInventoryNpc->ValueMultiplier);
     }
 

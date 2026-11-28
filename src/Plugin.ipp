@@ -48,10 +48,6 @@ Category Classify(const oCItem& item) {
 
 bool IsQuestItem(const oCItem& item) { return (item.flags & ITM_FLAG_MI) != 0; }
 
-bool CanMoveSaleItem(const oCItem& item, bool returning) {
-    return !(item.flags & ITM_FLAG_ACTIVE) && (returning || !IsQuestItem(item));
-}
-
 bool MissingRequirements(const oCItem& item) {
     constexpr auto equipment = ITM_CAT_NF | ITM_CAT_FF | ITM_CAT_ARMOR | ITM_CAT_RUNE;
     constexpr auto accessories = ITM_FLAG_SHIELD | ITM_FLAG_RING | ITM_FLAG_AMULET | ITM_FLAG_BELT;
@@ -697,7 +693,7 @@ public:
             const auto it = std::find_if(entries.begin(), entries.end(), [&](const Entry& entry) {
                 auto* item = nativeItems[entry.nativeIndex];
                 return item == quantity->item && item->GetInstance() == quantity->instance
-                    && CanMoveSaleItem(*item, quantity->returning);
+                    && !(item->flags & ITM_FLAG_ACTIVE);
             });
             if (it == entries.end()) quantity.reset();
             else {
@@ -784,7 +780,7 @@ public:
         SetSelection(index, false);
         const bool returning = category == Category::Sale;
         if (!shift) return returning ? Command::None : Command::Use;
-        if (!CanMoveSaleItem(*item, returning)) return Command::None;
+        if (item->flags & ITM_FLAG_ACTIVE) return Command::None;
         const int instance = item->GetInstance(), amount = Amount(index);
         if (amount == 1) MoveToSale(instance, amount, returning);
         else if (amount > 1) {
