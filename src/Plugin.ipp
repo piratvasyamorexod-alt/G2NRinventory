@@ -1068,6 +1068,20 @@ void CloseSession(bool reacquire = true) {
     closing->StopMouse(reacquire);
 }
 
+bool PreparePairSession(const InventoryPair& pair) {
+    if (session && session->trade.Pair().Matches(pair)) return true;
+    CloseSession();
+    auto next = std::make_unique<InventorySession>();
+    if (!next->trade.Open(pair)) return false;
+    auto& inv = *pair.hero;
+    if (inv.GetNumItemsInPackString() > 0) inv.UnpackAllItems();
+    if (!pair.IsActive()) return false;
+    next->trade.Refresh();
+    next->trade.Layout();
+    session = next.release();
+    return true;
+}
+
 HotbarPanel& GetHotbar() {
     if (!hotbar) hotbar = new HotbarPanel();
     return *hotbar;
@@ -1091,7 +1105,7 @@ auto KeyHook = Union::CreateHook(
 bool IsLootInput(oCItemContainer* container) {
     if (!session) return false;
     const auto& pair = session->trade.Pair();
-    return pair.IsLoot() && (container == pair.other || container == pair.hero) && pair.IsActive();
+    return pair.IsLoot() && pair.Contains(container) && pair.IsActive();
 }
 
 int HandleLootKey(int key) {
@@ -1239,13 +1253,11 @@ void __fastcall DrawInventory(oCItemContainer* container, void* edx) {
         DrawHook(container, edx);
         return;
     }
-    if (session && session->trade.Pair().other && session->trade.Pair().IsActive()) {
-        const auto& pair = session->trade.Pair();
-        if (container == pair.other) return;
-        if (container == pair.hero) {
-            session->trade.Draw(session->Position());
-            return;
-        }
+    // The first container draw can run in the same frame as Open, before the next input poll.
+    const auto pair = CurrentInventoryPair();
+    if (pair.other && pair.Contains(container) && PreparePairSession(pair)) {
+        if (container == pair.hero) session->trade.Draw(session->Position());
+        return;
     }
     if (session && !session->trade.Pair().other && PersonalInventory(container)) {
         auto& inv = player->inventory2;
@@ -1340,26 +1352,14 @@ void __cdecl PollInventory() {
     for (int i = 0; i < HotbarSlots; ++i) if (!(GetAsyncKeyState(VK_F1 + i) & 0x8000)) functionHeld[i] = false;
     PollHook();
     if (!InventoryAvailable()) return;
-    auto* shop = ActiveTrade();
-    auto* other = shop ? shop->DlgInventoryNpc->StealContainer : ActiveLoot();
-    if (other) {
-        const InventoryPair pair{other, &player->inventory2, shop};
-        if (!session || !session->trade.Pair().Matches(pair)) {
-            CloseSession();
-            auto next = std::make_unique<InventorySession>();
-            if (!next->trade.Open(pair)) return;
-            auto& inv = *pair.hero;
-            if (inv.GetNumItemsInPackString() > 0) inv.UnpackAllItems();
-            if (!pair.IsActive()) return;
-            next->trade.Refresh();
-            next->trade.Layout();
-            session = next.release();
-        }
+    const auto pair = CurrentInventoryPair();
+    if (pair.other) {
+        if (!PreparePairSession(pair)) return;
         if (session->closeLootRequested || session->PollPair()) {
-            if (shop) {
-                shop->OnKeyEsc();
+            if (pair.shop) {
+                pair.shop->OnKeyEsc();
                 CloseSession();
-            } else CloseLoot(other);
+            } else CloseLoot(pair.other);
         } else if (!pair.IsActive()) {
             CloseSession();
         }

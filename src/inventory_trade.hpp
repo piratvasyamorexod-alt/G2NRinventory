@@ -43,6 +43,7 @@ struct InventoryPair {
 
     bool Matches(const InventoryPair& pair) const { return other == pair.other && hero == pair.hero && shop == pair.shop; }
     bool IsLoot() const { return other && !shop; }
+    bool Contains(const oCItemContainer* container) const { return container == other || container == hero; }
     bool IsTheft() const { return IsLoot() && other->GetMode() == INV_MODE_STEAL; }
     oCItemContainer& Side(int index) const { return index == 0 ? *other : *hero; }
     bool IsActive() const {
@@ -51,6 +52,14 @@ struct InventoryPair {
                     : ActiveLoot() == other;
     }
 };
+
+InventoryPair CurrentInventoryPair() {
+    if (auto* shop = ActiveTrade()) {
+        return {shop->DlgInventoryNpc->StealContainer, &player->inventory2, shop};
+    }
+    if (auto* loot = ActiveLoot()) return {loot, &player->inventory2, nullptr};
+    return {};
+}
 
 void TakeFromNpc(oCItemContainer& source, oCItem* expected);
 
