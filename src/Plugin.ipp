@@ -934,7 +934,7 @@ class InventorySession {
 public:
     InventoryPanel panel;
     TradePanel trade{panel};
-    oCViewDialogTrade* dialog = nullptr;
+    bool closeLootRequested = false;
 
     ~InventorySession() { StopMouse(); }
 
@@ -962,7 +962,7 @@ public:
         return nullptr;
     }
 
-    bool PollTrade() {
+    bool PollPair() {
         if (!PrepareMouse()) return false;
         const auto input = events.Take();
         if (ClickPoint(input.rightClick, VK_RBUTTON, rightHeld)) return trade.Back();
@@ -970,14 +970,14 @@ public:
         const auto wheel = ScreenPoint(input.wheelPosition);
         if (click || (wheel && input.wheel)) {
             const bool wasConfirming = trade.HasConfirmation();
-            trade.Refresh(*dialog);
+            trade.Refresh();
             trade.Layout();
             if (wasConfirming && !trade.HasConfirmation()) return false;
-            if (click && trade.Click(*click, *dialog)) return true;
+            if (click && trade.Click(*click)) return true;
             if (wheel && input.wheel) trade.Scroll(*wheel, input.wheel);
         }
         trade.DragQuantity(Position(), (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0);
-        trade.Pump(*dialog);
+        trade.Pump();
         return false;
     }
 
@@ -1064,7 +1064,7 @@ bool InventoryAvailable() {
 void CloseSession(bool reacquire = true) {
     std::unique_ptr<InventorySession> closing(std::exchange(session, nullptr));
     if (!closing) return;
-    if (!closing->dialog) closing->panel.RememberPosition();
+    if (!closing->trade.Pair().other) closing->panel.RememberPosition();
     closing->StopMouse(reacquire);
 }
 
@@ -1088,6 +1088,76 @@ int __fastcall InventoryKey(oCNpcInventory*, void*, int);
 auto KeyHook = Union::CreateHook(
     SIGNATURE_OF(&oCNpcInventory::HandleEvent), &InventoryKey, Union::HookType::Hook_Detours);
 
+bool IsLootInput(oCItemContainer* container) {
+    if (!session) return false;
+    const auto& pair = session->trade.Pair();
+    return pair.IsLoot() && (container == pair.other || container == pair.hero) && pair.IsActive();
+}
+
+int HandleLootKey(int key) {
+    if (!session->HasFocus() || session->closeLootRequested) return TRUE;
+    if (zinput && key != KEY_TAB) {
+        const auto logical = zinput->GetFirstBindedLogicalKey(key);
+        if (logical == zLOGICKEY_END || logical == zLOGICKEY_INVENTORY) key = KEY_ESCAPE;
+    }
+    const bool wasConfirming = session->trade.HasConfirmation();
+    if (key == KEY_RETURN || key == KEY_NUMPADENTER) session->trade.Refresh();
+    if (wasConfirming && !session->trade.HasConfirmation()) return TRUE;
+    if (session->trade.Key(key)) session->closeLootRequested = true;
+    return TRUE;
+}
+
+int __fastcall ChestKey(oCItemContainer*, void*, int);
+auto ChestKeyHook = Union::CreateHook(
+    SIGNATURE_OF(&oCItemContainer::HandleEvent), &ChestKey, Union::HookType::Hook_Detours);
+
+int __fastcall ChestKey(oCItemContainer* container, void* edx, int key) {
+    return IsLootInput(container) ? HandleLootKey(key) : ChestKeyHook(container, edx, key);
+}
+
+int __fastcall CorpseKey(oCNpcContainer*, void*, int);
+auto CorpseKeyHook = Union::CreateHook(
+    SIGNATURE_OF(&oCNpcContainer::HandleEvent), &CorpseKey, Union::HookType::Hook_Detours);
+
+int __fastcall CorpseKey(oCNpcContainer* container, void* edx, int key) {
+    return IsLootInput(container) ? HandleLootKey(key) : CorpseKeyHook(container, edx, key);
+}
+
+int __fastcall StealKey(oCStealContainer*, void*, int);
+auto StealKeyHook = Union::CreateHook(
+    SIGNATURE_OF(&oCStealContainer::HandleEvent), &StealKey, Union::HookType::Hook_Detours);
+
+int __fastcall StealKey(oCStealContainer* container, void* edx, int key) {
+    return IsLootInput(container) ? HandleLootKey(key) : StealKeyHook(container, edx, key);
+}
+
+void TakeFromNpc(oCItemContainer& source, oCItem* expected) {
+    if (!zinput) return;
+    if (!source.IsActive()) source.Activate();
+    if (source.GetSelectedItem() != expected) return;
+    // Each native action takes one item and handles equipped loot or detection.
+    source.SetTransferCount(0);
+    if (source.GetMode() == INV_MODE_PLUNDER) {
+        CorpseKeyHook(static_cast<oCNpcContainer*>(&source), nullptr, MOUSE_BUTTONLEFT);
+    } else {
+        StealKeyHook(static_cast<oCStealContainer*>(&source), nullptr, MOUSE_BUTTONLEFT);
+    }
+}
+
+void CloseLoot(oCItemContainer* loot) {
+    CloseSession();
+    if (ActiveLoot() != loot) return;
+    if (loot->GetMode() == INV_MODE_PLUNDER) {
+        player->CloseDeadNpc();
+        return;
+    }
+    // The end handler closes the engine views and finishes the interaction.
+    if (!loot->IsActive()) loot->Activate();
+    zCArray<unsigned short> keys;
+    if (zinput && zinput->GetBinding(zLOGICKEY_END, keys) && keys.GetNum() > 0) loot->HandleEvent(keys[0]);
+    else loot->HandleEvent(KEY_ESCAPE);
+}
+
 void UseSelected(oCNpcInventory& inv) {
     if (!session || !zinput || !PersonalInventory(&inv) || !session->panel.SelectNative(inv)) return;
     auto* input = zinput;
@@ -1103,7 +1173,8 @@ void UseSelected(oCNpcInventory& inv) {
 }
 
 int __fastcall InventoryKey(oCNpcInventory* inv, void* edx, int key) {
-    if (!session || session->dialog || !PersonalInventory(inv) || !zinput) return KeyHook(inv, edx, key);
+    if (IsLootInput(inv)) return HandleLootKey(key);
+    if (!session || session->trade.Pair().other || !PersonalInventory(inv) || !zinput) return KeyHook(inv, edx, key);
     auto& panel = session->panel;
     if (panel.QuantityKey(key, *inv)) return TRUE;
     const auto logical = zinput->GetFirstBindedLogicalKey(key);
@@ -1140,10 +1211,10 @@ auto TradeKeyHook = Union::CreateHook(
     SIGNATURE_OF(&oCViewDialogTrade::HandleEvent), &TradeKey, Union::HookType::Hook_Detours);
 
 int __fastcall TradeKey(oCViewDialogTrade* dialog, void* edx, int key) {
-    if (!session || session->dialog != dialog || ActiveTrade() != dialog) return TradeKeyHook(dialog, edx, key);
+    if (!session || session->trade.Pair().shop != dialog || ActiveTrade() != dialog) return TradeKeyHook(dialog, edx, key);
     if (!session->HasFocus()) return TRUE;
     const bool wasConfirming = session->trade.HasConfirmation();
-    if (key == KEY_RETURN || key == KEY_NUMPADENTER) session->trade.Refresh(*dialog);
+    if (key == KEY_RETURN || key == KEY_NUMPADENTER) session->trade.Refresh();
     if (wasConfirming && !session->trade.HasConfirmation()) return TRUE;
     if (session->trade.Key(key)) dialog->OnKeyEsc();
     return TRUE;
@@ -1158,15 +1229,15 @@ void __fastcall DrawInventory(oCItemContainer* container, void* edx) {
         DrawHook(container, edx);
         return;
     }
-    if (session && session->dialog && ActiveTrade() == session->dialog) {
-        auto& dialog = *session->dialog;
-        if (container == TradePanel::Container(dialog, 0)) return;
-        if (container == TradePanel::Container(dialog, 1)) {
-            session->trade.Draw(dialog, session->Position());
+    if (session && session->trade.Pair().other && session->trade.Pair().IsActive()) {
+        const auto& pair = session->trade.Pair();
+        if (container == pair.other) return;
+        if (container == pair.hero) {
+            session->trade.Draw(session->Position());
             return;
         }
     }
-    if (session && !session->dialog && PersonalInventory(container)) {
+    if (session && !session->trade.Pair().other && PersonalInventory(container)) {
         auto& inv = player->inventory2;
         const auto point = session->Position();
         session->panel.Draw(inv, point, session->IsDragging());
@@ -1247,7 +1318,7 @@ auto CloseHook = Union::CreateHook(
     SIGNATURE_OF(&oCNpcInventory::Close), &CloseInventory, Union::HookType::Hook_Detours);
 
 void __fastcall CloseInventory(oCNpcInventory* inv, void* edx) {
-    if (player && inv == &player->inventory2 && session && !session->dialog) CloseSession(InventoryAvailable());
+    if (player && inv == &player->inventory2 && session && !session->trade.Pair().other) CloseSession(InventoryAvailable());
     CloseHook(inv, edx);
 }
 
@@ -1259,26 +1330,32 @@ void __cdecl PollInventory() {
     for (int i = 0; i < HotbarSlots; ++i) if (!(GetAsyncKeyState(VK_F1 + i) & 0x8000)) functionHeld[i] = false;
     PollHook();
     if (!InventoryAvailable()) return;
-    if (auto* dialog = ActiveTrade()) {
-        if (!session || session->dialog != dialog) {
+    auto* shop = ActiveTrade();
+    auto* other = shop ? shop->DlgInventoryNpc->StealContainer : ActiveLoot();
+    if (other) {
+        const InventoryPair pair{other, &player->inventory2, shop};
+        if (!session || !session->trade.Pair().Matches(pair)) {
             CloseSession();
             auto next = std::make_unique<InventorySession>();
-            if (!next->trade.Open()) return;
-            auto& inv = player->inventory2;
+            if (!next->trade.Open(pair)) return;
+            auto& inv = *pair.hero;
             if (inv.GetNumItemsInPackString() > 0) inv.UnpackAllItems();
-            if (ActiveTrade() != dialog) return;
-            next->dialog = dialog;
-            next->trade.Refresh(*dialog);
+            if (!pair.IsActive()) return;
+            next->trade.Refresh();
             next->trade.Layout();
             session = next.release();
         }
-        if (session->PollTrade()) {
-            dialog->OnKeyEsc();
+        if (session->closeLootRequested || session->PollPair()) {
+            if (shop) {
+                shop->OnKeyEsc();
+                CloseSession();
+            } else CloseLoot(other);
+        } else if (!pair.IsActive()) {
             CloseSession();
         }
         return;
     }
-    if (session && session->dialog) CloseSession();
+    if (session && session->trade.Pair().other) CloseSession();
     if (!player || !PersonalInventory(&player->inventory2)) {
         CloseSession();
         return;

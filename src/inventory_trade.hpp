@@ -15,6 +15,45 @@ oCViewDialogTrade* ActiveTrade() {
     return dialog;
 }
 
+oCItemContainer* ActiveLoot() {
+    if (!player || !ogame || !screen || !screen->GetFont() || screen->psizex < 480 || screen->psizey < 360
+        || zCMenu::GetActive()) return nullptr;
+    auto& inv = player->inventory2;
+    if (!inv.IsOpen() || inv.IsPassive() || inv.GetMode() != INV_MODE_DEFAULT || !inv.contents || !inv.rndWorld) return nullptr;
+
+    oCItemContainer* loot = nullptr;
+    for (auto* node = oCItemContainer::contList.GetNextInList(); node; node = node->GetNextInList()) {
+        auto* other = node->GetData();
+        if (!other || other == &inv || !other->IsOpen()) continue;
+        const int mode = other->GetMode();
+        const bool supported = mode == INV_MODE_CONTAINER || mode == INV_MODE_PLUNDER
+            || (mode == INV_MODE_STEAL && other == oCNpc::stealcontainer);
+        if (loot || !supported
+            || other->IsPassive() || !other->contents || !other->rndWorld) return nullptr;
+        loot = other;
+    }
+    if (!loot || (!loot->IsActive() && !inv.IsActive())) return nullptr;
+    return loot;
+}
+
+struct InventoryPair {
+    oCItemContainer* other = nullptr;
+    oCNpcInventory* hero = nullptr;
+    oCViewDialogTrade* shop = nullptr;
+
+    bool Matches(const InventoryPair& pair) const { return other == pair.other && hero == pair.hero && shop == pair.shop; }
+    bool IsLoot() const { return other && !shop; }
+    bool IsTheft() const { return IsLoot() && other->GetMode() == INV_MODE_STEAL; }
+    oCItemContainer& Side(int index) const { return index == 0 ? *other : *hero; }
+    bool IsActive() const {
+        if (!other || !player || hero != &player->inventory2) return false;
+        return shop ? ActiveTrade() == shop && shop->DlgInventoryNpc->StealContainer == other
+                    : ActiveLoot() == other;
+    }
+};
+
+void TakeFromNpc(oCItemContainer& source, oCItem* expected);
+
 class TradePanel {
     struct Slot { oCItem* item; int price; Entry entry; bool upgrade; };
     struct Lot { oCItem* item; int instance, amount, price; };
@@ -40,6 +79,7 @@ class TradePanel {
     };
 
     InventoryPanel& ui;
+    InventoryPair pair;
     zCView upgradeMarker{0, 0, 8, 8};
     std::array<Side, 2> sides;
     Box close, bulkButton, footer, card, confirm, cancel, number, slider;
@@ -53,6 +93,14 @@ class TradePanel {
     int SellPrice(oCViewDialogTrade& dialog, oCItem& item) const {
         if (item.GetInstance() == currency || (item.flags & ITM_FLAG_ACTIVE)) return 0;
         return InventoryTrade::SalePrice(item.GetValue(), dialog.DlgInventoryNpc->ValueMultiplier);
+    }
+
+    int TransferLimit(const Slot& slot, bool toHero) const {
+        if (pair.IsLoot()) {
+            if (pair.IsTheft()) return toHero ? 1 : 0;
+            return pair.Side(toHero ? 0 : 1).CanTransferMoreThanOneItem() ? slot.entry.quantity : 1;
+        }
+        return InventoryTrade::Affordable(slot.entry.quantity, slot.price, toHero ? wallet : INT_MAX - wallet);
     }
 
     std::int64_t Count(oCItemContainer& container, int instance) const {
@@ -84,11 +132,17 @@ class TradePanel {
         if (!slot) return;
         keyboard = choice;
         const bool buy = choice.side == 0;
-        if (!buy && slot->price <= 0) {
+        const bool loot = pair.IsLoot();
+        if (!buy && pair.IsTheft()) return;
+        if (loot && !buy && (slot->item->flags & ITM_FLAG_ACTIVE)) {
+            status = ui.Label(L"Предмет экипирован", "Item is equipped");
+            return;
+        }
+        if (!loot && !buy && slot->price <= 0) {
             status = ui.Label(L"Предмет не продаётся", "Item cannot be sold");
             return;
         }
-        const int limit = InventoryTrade::Affordable(slot->entry.quantity, slot->price, buy ? wallet : INT_MAX - wallet);
+        const int limit = TransferLimit(*slot, buy);
         if (limit <= 0) {
             status = buy ? ui.Label(L"Не хватает золота", "Not enough gold") : ui.Label(L"Достигнут предел золота", "Gold limit reached");
             return;
@@ -96,6 +150,7 @@ class TradePanel {
         const bool reserved = !buy && sides[choice.side].category == Category::Sale;
         deal.emplace(Deal{buy, false, reserved, {{slot->item, slot->item->GetInstance(), limit, slot->price}}});
         status.clear();
+        if (loot && limit == 1) Confirm();
     }
 
     void Confirm() {
@@ -111,10 +166,10 @@ class TradePanel {
         return deal->typing ? InventoryLayout::QuantityFromText(deal->digits, deal->lots.front().amount) : deal->amount;
     }
 
-    int TransferOne(oCViewDialogTrade& dialog, const Lot& lot) {
-        if (ActiveTrade() != &dialog) return 0;
-        auto& inv = *dialog.DlgInventoryPlayer->Inventory;
-        auto& source = *Container(dialog, deal->buy ? 0 : 1);
+    int TransferOne(const Lot& lot) {
+        if (!pair.IsActive()) return 0;
+        auto& inv = *pair.hero;
+        auto& source = pair.Side(deal->buy ? 0 : 1);
         int index = 0;
         oCItem* selected = nullptr;
         const int reserved = history.ForSale(lot.instance);
@@ -128,21 +183,35 @@ class TradePanel {
             selected = item;
             break;
         }
-        if (!selected || lot.instance == currency) return 0;
-        const int price = deal->buy ? (std::max)(0, selected->GetValue()) : SellPrice(dialog, *selected);
-        if (price != lot.price || (!deal->buy && price <= 0)) return 0;
-        const auto gold = Count(inv, currency);
-        if (deal->buy ? gold < price : gold + price > INT_MAX) return 0;
-
-        const auto section = deal->buy ? oCViewDialogTrade::TRADE_SECTION_LEFT_INVENTORY
-                                       : oCViewDialogTrade::TRADE_SECTION_RIGHT_INVENTORY;
-        if (dialog.SectionTrade != section) dialog.OnSection(section);
+        if (!selected || (pair.shop && lot.instance == currency)) return 0;
+        std::int64_t gold = 0;
+        if (auto* shop = pair.shop) {
+            const int price = deal->buy ? (std::max)(0, selected->GetValue()) : SellPrice(*shop, *selected);
+            if (price != lot.price || (!deal->buy && price <= 0)) return 0;
+            gold = Count(inv, currency);
+            if (deal->buy ? gold < price : gold + price > INT_MAX) return 0;
+            const auto section = deal->buy ? oCViewDialogTrade::TRADE_SECTION_LEFT_INVENTORY
+                                           : oCViewDialogTrade::TRADE_SECTION_RIGHT_INVENTORY;
+            if (shop->SectionTrade != section) shop->OnSection(section);
+        }
         source.selectedItem = index;
         source.CheckSelectedItem();
         if (source.GetSelectedItem() != selected) return 0;
         const auto before = Count(inv, lot.instance);
-        if (deal->buy) dialog.OnTransferRight(1);
-        else dialog.OnTransferLeft(1);
+        if (auto* shop = pair.shop) {
+            if (deal->buy) shop->OnTransferRight(1);
+            else shop->OnTransferLeft(1);
+        } else if (deal->buy && source.GetMode() != INV_MODE_CONTAINER) {
+            TakeFromNpc(source, selected);
+        } else {
+            auto& destination = pair.Side(deal->buy ? 1 : 0);
+            int sourceX = 0, destinationX = 0, y = 0;
+            source.GetPosition(sourceX, y);
+            destination.GetPosition(destinationX, y);
+            if (sourceX == destinationX || (!deal->buy && (selected->flags & ITM_FLAG_ACTIVE))) return 0;
+            source.TransferItem(destinationX < sourceX ? -1 : 1, 1);
+        }
+        if (!player || &player->inventory2 != &inv) return 0;
         const auto difference = Count(inv, lot.instance) - before;
         const auto moved = deal->buy ? difference : -difference;
         if (moved <= 0) return 0;
@@ -150,19 +219,26 @@ class TradePanel {
             history.SetForSale(lot.instance, reserved - static_cast<int>((std::min)(std::int64_t(reserved), moved)));
         }
         deal->moved += moved;
-        deal->gold += Count(inv, currency) - gold;
+        if (pair.shop) deal->gold += Count(inv, currency) - gold;
         return static_cast<int>((std::min)(std::int64_t(lot.amount), moved));
     }
 
     void Finish(bool interrupted = false) {
         if (!deal->moved) {
-            status = ui.Label(L"Обмен не состоялся", "No items transferred");
+            status = pair.IsLoot() ? ui.Label(L"Предметы не перенесены", "No items transferred")
+                                   : ui.Label(L"Обмен не состоялся", "No items transferred");
         } else {
-            status = deal->buy ? ui.Label(L"Куплено", "Bought") : ui.Label(L"Продано", "Sold");
-            status += "  " + std::to_string(deal->moved) + "    " + (deal->gold >= 0 ? "+" : "") + std::to_string(deal->gold);
+            status = pair.IsLoot() ? TransferLabel(L"Взято", "Taken", L"Положено", "Stored")
+                                  : TransferLabel(L"Куплено", "Bought", L"Продано", "Sold");
+            status += "  " + std::to_string(deal->moved);
+            if (pair.shop) status += std::string("    ") + (deal->gold >= 0 ? "+" : "") + std::to_string(deal->gold);
             if (interrupted) status += ui.Label(L"  Частично", "  Partial");
         }
         deal.reset();
+    }
+
+    std::string TransferLabel(const wchar_t* toRu, const char* toEn, const wchar_t* fromRu, const char* fromEn) {
+        return deal->buy ? ui.Label(toRu, toEn) : ui.Label(fromRu, fromEn);
     }
 
     void Control(Box area, const std::string& label, std::optional<POINT> point, bool enabled = true) {
@@ -178,7 +254,8 @@ class TradePanel {
         ui.Frame(card, Bronze);
         const int x = card.x + 14, w = card.width - 28, h = ui.lineHeight;
         const auto title = deal->bulk ? ui.Label(L"Продать отложенное", "Sell set-aside items")
-            : deal->buy ? ui.Label(L"Купить", "Buy") : ui.Label(L"Продать", "Sell");
+            : pair.IsLoot() ? TransferLabel(L"Взять", "Take", L"Положить", "Store")
+                            : TransferLabel(L"Купить", "Buy", L"Продать", "Sell");
         ui.Text(x, card.y + 10, title, w, Bronze);
         if (deal->started) {
             ui.Text(x, card.y + 10 + 2 * h, ui.Label(L"Обменено", "Transferred") + "  " + std::to_string(deal->moved), w);
@@ -202,7 +279,7 @@ class TradePanel {
             else ui.Text(x, number.y, count, w);
             if (lot.amount > 1) ui.DrawQuantitySlider(slider, selected, lot.amount);
         }
-        ui.Text(x, card.y + 13 + 4 * h, ui.Label(L"Золото", "Gold") + "  " + (deal->buy ? "-" : "+") + std::to_string(total), w, Bright);
+        if (pair.shop) ui.Text(x, card.y + 13 + 4 * h, ui.Label(L"Золото", "Gold") + "  " + (deal->buy ? "-" : "+") + std::to_string(total), w, Bright);
         Control(confirm, ui.Label(L"Подтвердить", "Confirm"), point);
         Control(cancel, ui.Label(L"Отмена", "Cancel"), point);
     }
@@ -210,16 +287,14 @@ class TradePanel {
 public:
     explicit TradePanel(InventoryPanel& view) : ui(view) {}
 
-    static oCItemContainer* Container(oCViewDialogTrade& dialog, int side) {
-        if (side == 0) return dialog.DlgInventoryNpc->StealContainer;
-        return dialog.DlgInventoryPlayer->Inventory;
+    bool Open(InventoryPair containers) {
+        pair = containers;
+        if (pair.shop) currency = oCItemContainer::GetCurrencyInstance();
+        InitSprite(upgradeMarker, "G2NRI_UPGRADE.TGA");
+        return ui.Ready() && (pair.IsLoot() || currency >= 0);
     }
 
-    bool Open() {
-        currency = oCItemContainer::GetCurrencyInstance();
-        InitSprite(upgradeMarker, "G2NRI_UPGRADE.TGA");
-        return ui.Ready() && currency >= 0;
-    }
+    const InventoryPair& Pair() const { return pair; }
 
     void Layout() {
         ui.panel.SetFont(screen->GetFont());
@@ -255,7 +330,7 @@ public:
         const int button = (std::min)(footer.width / 2, ui.Width(ui.Label(L"Продать отложенное", "Sell set-aside items")) + 21);
         bulkButton = {footer.Right() - button, footer.y + 4, button, h + 8};
         const int cardWidth = (std::min)(width - 2 * pad, (std::max)(300, 13 * h));
-        const int cardHeight = 6 * h + 30;
+        const int cardHeight = (pair.shop ? 6 : 5) * h + 30;
         card = {(screen->psizex - cardWidth) / 2, (screen->psizey - cardHeight) / 2, cardWidth, cardHeight};
         number = {card.x + 14, card.y + 10 + 2 * h, card.width - 28, h};
         slider = {card.x + 20, card.y + 10 + 3 * h, card.width - 40, h};
@@ -264,15 +339,15 @@ public:
         cancel = {confirm.Right() + 7, confirm.y, w, confirm.height};
     }
 
-    void Refresh(oCViewDialogTrade& dialog) {
+    void Refresh() {
         marked.clear();
         wallet = 0;
         const auto equippedDamage = [](oCItem* item) -> std::optional<int> {
             return item ? std::optional{WeaponDamage(*item)} : std::nullopt;
         };
-        const auto melee = equippedDamage(dialog.NpcRight->GetEquippedMeleeWeapon());
-        const auto ranged = equippedDamage(dialog.NpcRight->GetEquippedRangedWeapon());
-        const auto* armor = dialog.NpcRight->GetEquippedArmor();
+        const auto melee = equippedDamage(player->GetEquippedMeleeWeapon());
+        const auto ranged = equippedDamage(player->GetEquippedRangedWeapon());
+        const auto* armor = player->GetEquippedArmor();
         const auto armorTotal = armor ? std::optional{InventoryTrade::ProtectionTotal(armor->protection)} : std::nullopt;
         const auto isUpgrade = [&](const oCItem& item, Category category, int damage) {
             if (category == Category::Weapons) {
@@ -290,7 +365,7 @@ public:
             const bool hero = i == 1;
             side.items.clear();
             side.counts.fill(0);
-            for (auto* node = Container(dialog, i)->contents->GetNextInList(); node; node = node->GetNextInList()) {
+            for (auto* node = pair.Side(i).contents->GetNextInList(); node; node = node->GetNextInList()) {
                 auto* item = node->GetData();
                 if (!item || item->amount <= 0) continue;
                 if (!cyrillic) {
@@ -298,11 +373,11 @@ public:
                     cyrillic = std::any_of(name.begin(), name.end(), [](unsigned char c) { return c >= 0xC0; });
                 }
                 const int instance = item->GetInstance();
-                if (instance == currency) {
+                if (pair.shop && instance == currency) {
                     if (hero) wallet += item->amount;
                     continue;
                 }
-                const int price = hero ? SellPrice(dialog, *item) : (std::max)(0, item->GetValue());
+                const int price = !pair.shop ? 0 : hero ? SellPrice(*pair.shop, *item) : (std::max)(0, item->GetValue());
                 int held = 0;
                 if (hero && !(item->flags & ITM_FLAG_ACTIVE)) {
                     const int queued = history.ForSale(instance);
@@ -342,22 +417,21 @@ public:
             const auto match = std::find_if(slots.begin(), slots.end(), [&](const Slot& slot) {
                 return slot.item == lot.item && slot.item->GetInstance() == lot.instance;
             });
-            const auto gold = deal->buy ? wallet : INT_MAX - wallet;
-            const int limit = match == slots.end() || match->price != lot.price
-                ? 0 : InventoryTrade::Affordable(match->entry.quantity, lot.price, gold);
+            const int limit = match == slots.end() || match->price != lot.price ? 0 : TransferLimit(*match, deal->buy);
             if (limit < Quantity()) {
                 deal.reset();
-                status = ui.Label(L"Условия обмена изменились", "Trade terms changed");
+                status = pair.IsLoot() ? ui.Label(L"Предмет изменился", "Item changed")
+                                       : ui.Label(L"Условия обмена изменились", "Trade terms changed");
             } else lot.amount = limit;
         }
     }
 
-    void Pump(oCViewDialogTrade& dialog) {
+    void Pump() {
         if (!deal || !deal->started) return;
         constexpr int transfersPerFrame = 12;
         for (int i = 0; i < transfersPerFrame && deal->current < deal->lots.size(); ++i) {
             auto& lot = deal->lots[deal->current];
-            if (const int moved = TransferOne(dialog, lot)) lot.amount -= moved;
+            if (const int moved = TransferOne(lot)) lot.amount -= moved;
             else if (!deal->bulk) { Finish(true); return; }
             else { ++deal->current; continue; }
             if (lot.amount == 0) ++deal->current;
@@ -370,7 +444,7 @@ public:
 
     bool HasConfirmation() const { return deal.has_value(); }
 
-    bool Click(POINT point, oCViewDialogTrade& dialog) {
+    bool Click(POINT point) {
         if (deal) {
             if (cancel.Hit(point.x, point.y)) return Back();
             if (!deal->started && confirm.Hit(point.x, point.y)) Confirm();
@@ -394,12 +468,12 @@ public:
                     side.category = *category;
                     side.firstRow = 0;
                     keyboard = Choice{i, 0};
-                    Refresh(dialog);
+                    Refresh();
                 }
                 return false;
             }
         }
-        if (bulkButton.Hit(point.x, point.y) && !marked.empty()) {
+        if (pair.shop && bulkButton.Hit(point.x, point.y) && !marked.empty()) {
             deal.emplace(Deal{false, true, true, marked});
             status.clear();
         } else if (auto choice = Hit(point)) Begin(*choice);
@@ -469,8 +543,8 @@ public:
         return false;
     }
 
-    void Draw(oCViewDialogTrade& dialog, std::optional<POINT> point) {
-        Refresh(dialog);
+    void Draw(std::optional<POINT> point) {
+        Refresh();
         Layout();
         ui.textView.ClrPrintwin();
         const auto hover = point && !deal ? Hit(*point) : std::nullopt;
@@ -478,13 +552,17 @@ public:
         zrenderer->SetAlphaBlendSource(zRND_ALPHA_SOURCE_MATERIAL);
         ui.panel.Blit();
         const int left = footer.x, top = close.y, h = ui.lineHeight;
-        ui.Text(left, top, ui.Label(L"ТОРГОВЛЯ", "TRADE"), footer.width / 2, Bronze);
-        ui.Text(left + footer.width / 2, top, ui.Label(L"Золото", "Gold") + "  " + std::to_string(wallet), close.x - left - footer.width / 2 - 12, Bright, true);
+        const auto heading = pair.shop ? ui.Label(L"ТОРГОВЛЯ", "TRADE")
+            : pair.IsTheft() ? ui.Label(L"КРАЖА", "STEAL")
+            : pair.other->GetMode() == INV_MODE_PLUNDER ? ui.Label(L"ОБЫСК", "LOOT") : ui.Label(L"СУНДУК", "CHEST");
+        ui.Text(left, top, heading, footer.width / 2, Bronze);
+        if (pair.shop) ui.Text(left + footer.width / 2, top, ui.Label(L"Золото", "Gold") + "  " + std::to_string(wallet), close.x - left - footer.width / 2 - 12, Bright, true);
         ui.Text(close.x, top, "Esc", close.width, Bronze, true);
         ui.Fill({left, top + h, footer.width, 1}, Rule);
         for (int i = 0; i < 2; ++i) {
             const auto& side = sides[i];
-            const auto title = i == 0 ? std::string(dialog.NpcLeft->name[0].ToChar()) : ui.Label(L"Вещи героя", "Your items");
+            const auto title = i == 1 ? ui.Label(L"Вещи героя", "Your items")
+                : pair.shop ? std::string(pair.shop->NpcLeft->name[0].ToChar()) : std::string(pair.other->GetName().ToChar());
             ui.Text(side.grid.area.x, top + h + 5, title, side.grid.area.width, Bronze);
             ui.Fill({side.grid.area.x, side.grid.area.y - 2, side.grid.area.width, 1}, Rule);
             ui.DrawTabs(side.tabs, side.category, side.counts, deal ? std::nullopt : point);
@@ -505,9 +583,11 @@ public:
                          (static_cast<int>(side.items.size()) + side.grid.columns - 1) / side.grid.columns, side.firstRow);
         }
         ui.Fill({left, footer.y, footer.width, 1}, Rule);
-        ui.Text(left, footer.y + 8, status.empty() ? ui.Label(L"ЛКМ  Купить или продать", "Click  Buy or sell") : status,
-                bulkButton.x - left - 10, Bronze);
-        Control(bulkButton, ui.Label(L"Продать отложенное", "Sell set-aside items"), deal ? std::nullopt : point, !marked.empty());
+        const auto controls = pair.shop ? ui.Label(L"ЛКМ  Купить или продать", "Click  Buy or sell")
+                                        : pair.IsTheft() ? ui.Label(L"ЛКМ  Взять", "Click  Take")
+                                        : ui.Label(L"ЛКМ  Взять или положить", "Click  Take or store");
+        ui.Text(left, footer.y + 8, status.empty() ? controls : status, pair.shop ? bulkButton.x - left - 10 : footer.width, Bronze);
+        if (pair.shop) Control(bulkButton, ui.Label(L"Продать отложенное", "Sell set-aside items"), deal ? std::nullopt : point, !marked.empty());
         zrenderer->SetAlphaBlendSource(alpha);
 
         oCItem::SetLightingSwell(FALSE);
@@ -519,7 +599,7 @@ public:
                 if (!entry) continue;
                 const auto cell = side.grid.Cell(slot);
                 Place(ui.preview, {cell.x + 3, cell.y + 4, cell.width - 6, cell.height - 9});
-                entry->item->RenderItem(Container(dialog, i)->rndWorld, &ui.preview, 0.0f);
+                entry->item->RenderItem(pair.Side(i).rndWorld, &ui.preview, 0.0f);
                 ui.DrawMissingVisualName(*entry->item, entry->entry.quantity, cell);
             }
         }
@@ -545,7 +625,8 @@ public:
         ui.textView.DrawItems();
         if (hover) {
             const auto* entry = Item(*hover);
-            const auto price = hover->side == 1 && entry->price <= 0 ? ui.Label(L"Предмет не продаётся", "Item cannot be sold")
+            const auto price = !pair.shop ? std::string{}
+                : hover->side == 1 && entry->price <= 0 ? ui.Label(L"Предмет не продаётся", "Item cannot be sold")
                 : (hover->side == 0 ? ui.Label(L"Покупка за штуку", "Buy per item") : ui.Label(L"Продажа за штуку", "Sell per item"))
                     + "  " + std::to_string(entry->price);
             ui.DrawTooltip(entry->item, entry->entry.quantity, point, price);
