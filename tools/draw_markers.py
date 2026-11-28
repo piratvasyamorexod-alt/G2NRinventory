@@ -30,10 +30,6 @@ def make_badge(kind, rim, highlight):
         line([(12, 15), (12, 11), (14, 9), (18, 9), (20, 11), (20, 15)], highlight, 2)
         polygon([(10, 14), (22, 14), (22, 23), (10, 23)], highlight)
         line([(16, 17), (16, 20)], "#3b261a", 2)
-    elif kind == "QUEST":
-        polygon([(16, 7), (27, 16), (16, 25), (5, 16)], highlight)
-        line([(16, 11), (16, 17)], "#302415", 3)
-        polygon([(15, 19), (17, 19), (17, 21), (15, 21)], "#302415")
     elif kind == "UPGRADE":
         polygon([(16, 7), (25, 16), (20, 16), (20, 24),
                  (12, 24), (12, 16), (7, 16)], highlight)
@@ -167,7 +163,6 @@ if __name__ == "__main__":
         ("LOCKED", "#8d5a43", "#e0a286"),
         ("UNREAD", "#8b6e42", "#e8c58c"),
         ("EQUIPPED", "#708054", "#c1d297"),
-        ("QUEST", "#9f7442", "#d4af72"),
         ("UPGRADE", "#708054", "#b7c98e"),
     ):
         write_texture(kind, make_badge(kind, rim, highlight))

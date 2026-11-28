@@ -46,8 +46,6 @@ Category Classify(const oCItem& item) {
     return Category::Other;
 }
 
-bool IsQuestItem(const oCItem& item) { return (item.flags & ITM_FLAG_MI) != 0; }
-
 bool MissingRequirements(const oCItem& item) {
     constexpr auto equipment = ITM_CAT_NF | ITM_CAT_FF | ITM_CAT_ARMOR | ITM_CAT_RUNE;
     constexpr auto accessories = ITM_FLAG_SHIELD | ITM_FLAG_RING | ITM_FLAG_AMULET | ITM_FLAG_BELT;
@@ -63,6 +61,26 @@ bool MissingRequirements(const oCItem& item) {
 int WeaponDamage(oCItem& item) {
     return item.damageTotal > 0 ? item.damageTotal : (std::max)(0, item.GetFullDamage());
 }
+
+struct EquippedGear {
+    std::optional<int> melee, ranged;
+    std::optional<std::int64_t> armor;
+
+    explicit EquippedGear(oCNpc& npc) {
+        if (auto* weapon = npc.GetEquippedMeleeWeapon()) melee = WeaponDamage(*weapon);
+        if (auto* weapon = npc.GetEquippedRangedWeapon()) ranged = WeaponDamage(*weapon);
+        if (const auto* worn = npc.GetEquippedArmor()) armor = InventoryTrade::ProtectionTotal(worn->protection);
+    }
+
+    bool IsUpgrade(const oCItem& item, Category category, int damage) const {
+        if (category == Category::Weapons) {
+            const auto& equipped = item.mainflag & ITM_CAT_NF ? melee : ranged;
+            return equipped && damage > *equipped;
+        }
+        return category == Category::Armor && !(item.flags & ITM_FLAG_SHIELD) && armor
+            && InventoryTrade::ProtectionTotal(item.protection) > *armor;
+    }
+};
 
 bool PersonalInventory(const oCItemContainer* container) {
     if (!player || container != &player->inventory2 || !screen || !screen->GetFont()
@@ -156,7 +174,7 @@ class InventoryPanel {
     zCView lockedMarker{0, 0, 8, 8};
     zCView unreadMarker{0, 0, 8, 8};
     zCView equippedMarker{0, 0, 8, 8};
-    zCView questMarker{0, 0, 8, 8};
+    zCView upgradeMarker{0, 0, 8, 8};
     std::array<zCView, CategoryCount> tabIcons;
     Box bounds, close, listBar;
     InventoryLayout::FittedTabs tabs;
@@ -273,25 +291,22 @@ class InventoryPanel {
 
     void DrawMissingVisualName(oCItem& item, int amount, Box cell) {
         if (item.GetVisual()) return;
-        const int badgeSpace = IsQuestItem(item) && questMarker.backTex ? MarkerSize(cell) : 0;
         const int amountSpace = amount > 1 ? Width(std::to_string(amount)) : 0;
-        Text(cell.x + 4 + badgeSpace, cell.Bottom() - lineHeight, item.name.ToChar(),
-             cell.width - 10 - amountSpace - badgeSpace);
+        Text(cell.x + 4, cell.Bottom() - lineHeight, item.name.ToChar(), cell.width - 10 - amountSpace);
     }
 
-    void DrawItemMarkers(oCItem& item, Box cell, zCView* upgrade = nullptr) {
+    void DrawItemMarkers(oCItem& item, Box cell, bool upgrade) {
         const int size = MarkerSize(cell);
         const bool equipped = (item.flags & ITM_FLAG_ACTIVE) != 0;
         if (equipped) DrawMarker(equippedMarker, cell.x + 2, cell.y + 2, size);
         if (upgrade) {
             const int x = cell.x + (equipped ? size + 3 : 2);
             const int arrowSize = equipped ? (std::min)(size, cell.width - 2 * size - 5) : size;
-            if (arrowSize > 0) DrawMarker(*upgrade, x, cell.y + 2, arrowSize);
+            if (arrowSize > 0) DrawMarker(upgradeMarker, x, cell.y + 2, arrowSize);
         }
         if (MissingRequirements(item)) DrawMarker(lockedMarker, cell.Right() - size - 2, cell.y + 2, size);
         else if (ReadableDocument(item) && !history.WasRead(item.GetInstance()))
             DrawMarker(unreadMarker, cell.Right() - size - 2, cell.y + 2, size);
-        if (IsQuestItem(item)) DrawMarker(questMarker, cell.x + 2, cell.Bottom() - size - 2, size);
     }
 
     void DrawTabs(const InventoryLayout::FittedTabs& layout, Category current,
@@ -395,7 +410,6 @@ class InventoryPanel {
         };
         const std::string name = item.name.ToChar();
         wrap(name, Bright);
-        if (IsQuestItem(item)) wrap(Label(L"Квестовый предмет", "Quest item"), Bronze);
         if (item.flags & ITM_FLAG_ACTIVE) {
             wrap(Label(L"Экипировано", "Equipped"), Equipped);
         }
@@ -583,7 +597,7 @@ public:
         InitSprite(lockedMarker, "G2NRI_LOCKED.TGA");
         InitSprite(unreadMarker, "G2NRI_UNREAD.TGA");
         InitSprite(equippedMarker, "G2NRI_EQUIPPED.TGA");
-        InitSprite(questMarker, "G2NRI_QUEST.TGA");
+        InitSprite(upgradeMarker, "G2NRI_UPGRADE.TGA");
         for (int i = 0; i < CategoryCount; ++i) InitSprite(tabIcons[i], CategoryTextures[i]);
     }
 
@@ -846,8 +860,14 @@ public:
         }
         oCItem::SetLightingSwell(TRUE);
         zrenderer->SetAlphaBlendSource(zRND_ALPHA_SOURCE_MATERIAL);
+        const EquippedGear gear(*player);
         for (int slot = 0; slot < slots; ++slot) {
-            if (auto* item = Item(first + slot)) DrawItemMarkers(*item, grid.Cell(slot));
+            const int index = first + slot;
+            if (auto* item = Item(index)) {
+                const auto& entry = entries[index];
+                const bool upgrade = !(item->flags & ITM_FLAG_ACTIVE) && gear.IsUpgrade(*item, entry.category, entry.damage);
+                DrawItemMarkers(*item, grid.Cell(slot), upgrade);
+            }
         }
         zrenderer->SetAlphaBlendSource(previousAlpha);
         textView.DrawItems();
