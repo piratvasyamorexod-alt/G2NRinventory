@@ -37,15 +37,12 @@ def make_badge(kind, rim, highlight):
     elif kind == "UPGRADE":
         polygon([(16, 7), (25, 16), (20, 16), (20, 24),
                  (12, 24), (12, 16), (7, 16)], highlight)
-    elif kind in ("UNREAD", "READ"):
+    elif kind == "UNREAD":
         polygon([(8, 10), (12, 10), (16, 12), (20, 10), (24, 10), (24, 21),
                  (20, 21), (16, 23), (12, 21), (8, 21)], highlight)
         line([(16, 12), (16, 22)], "#6b4b27", 1)
         line([(10, 14), (14, 15)], "#876536", 1)
         line([(18, 15), (22, 14)], "#876536", 1)
-        if kind == "READ":
-            line([(14, 19), (17, 22), (24, 15)], "#24261a", 4)
-            line([(14, 19), (17, 22), (24, 15)], "#c1d297", 2)
     else:
         line([(9, 16), (14, 21), (23, 11)], highlight, 3)
 
@@ -169,7 +166,6 @@ if __name__ == "__main__":
     for kind, rim, highlight in (
         ("LOCKED", "#8d5a43", "#e0a286"),
         ("UNREAD", "#8b6e42", "#e8c58c"),
-        ("READ", "#708054", "#e8c58c"),
         ("EQUIPPED", "#708054", "#c1d297"),
         ("QUEST", "#9f7442", "#d4af72"),
         ("UPGRADE", "#708054", "#b7c98e"),

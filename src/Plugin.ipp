@@ -155,7 +155,6 @@ class InventoryPanel {
     zCView cursor{0, 0, 8, 8};
     zCView lockedMarker{0, 0, 8, 8};
     zCView unreadMarker{0, 0, 8, 8};
-    zCView readMarker{0, 0, 8, 8};
     zCView equippedMarker{0, 0, 8, 8};
     zCView questMarker{0, 0, 8, 8};
     std::array<zCView, CategoryCount> tabIcons;
@@ -290,10 +289,8 @@ class InventoryPanel {
             if (arrowSize > 0) DrawMarker(*upgrade, x, cell.y + 2, arrowSize);
         }
         if (MissingRequirements(item)) DrawMarker(lockedMarker, cell.Right() - size - 2, cell.y + 2, size);
-        else if (ReadableDocument(item)) {
-            auto& marker = history.WasRead(item.GetInstance()) ? readMarker : unreadMarker;
-            DrawMarker(marker, cell.Right() - size - 2, cell.y + 2, size);
-        }
+        else if (ReadableDocument(item) && !history.WasRead(item.GetInstance()))
+            DrawMarker(unreadMarker, cell.Right() - size - 2, cell.y + 2, size);
         if (IsQuestItem(item)) DrawMarker(questMarker, cell.x + 2, cell.Bottom() - size - 2, size);
     }
 
@@ -585,7 +582,6 @@ public:
         InitSprite(cursor, "G2NRI_CURSOR.TGA");
         InitSprite(lockedMarker, "G2NRI_LOCKED.TGA");
         InitSprite(unreadMarker, "G2NRI_UNREAD.TGA");
-        InitSprite(readMarker, "G2NRI_READ.TGA");
         InitSprite(equippedMarker, "G2NRI_EQUIPPED.TGA");
         InitSprite(questMarker, "G2NRI_QUEST.TGA");
         for (int i = 0; i < CategoryCount; ++i) InitSprite(tabIcons[i], CategoryTextures[i]);
