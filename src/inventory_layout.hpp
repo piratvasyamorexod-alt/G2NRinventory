@@ -136,6 +136,19 @@ inline int QuantityPosition(Box slider, int quantity, int maximum) {
     return slider.x + static_cast<int>(((quantity - 1) * span + (maximum - 1) / 2) / (maximum - 1));
 }
 
+inline constexpr int QuantityThumbHalfWidth = 3;
+
+inline Box QuantityThumb(Box slider, int position) {
+    return {position - QuantityThumbHalfWidth, slider.y + slider.height / 2 - 7,
+            2 * QuantityThumbHalfWidth + 1, 14};
+}
+
+inline Box QuantitySliderHitArea(Box slider) {
+    // The thumb is centered on the track endpoints and protrudes on both sides.
+    constexpr int padding = QuantityThumbHalfWidth + 4;
+    return {slider.x - padding, slider.y, slider.width + 2 * padding, slider.height};
+}
+
 inline bool ComesBefore(const Entry& a, const Entry& b, Category view) {
     if (view == Category::Recent) return a.recentRank < b.recentRank;
     if (a.category != b.category) return a.category < b.category;

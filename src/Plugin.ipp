@@ -497,6 +497,14 @@ class InventoryPanel {
         tooltipText.DrawItems();
     }
 
+    void DrawQuantitySlider(Box slider, int amount, int maximum) {
+        const int center = slider.y + slider.height / 2;
+        const int position = InventoryLayout::QuantityPosition(slider, amount, maximum);
+        Fill({slider.x, center - 2, slider.width, 4}, Rule);
+        Fill({slider.x, center - 2, position - slider.x + 1, 4}, Bronze);
+        Fill(InventoryLayout::QuantityThumb(slider, position), Bright);
+    }
+
     void DrawQuantity(std::optional<POINT> point) {
         const auto& edit = *quantity;
         const auto [card, number, slider, confirm, cancel] = QuantityLayout();
@@ -507,12 +515,8 @@ class InventoryPanel {
         const auto hit = [&](Box box) { return point && box.Hit(point->x, point->y); };
         Fill(number, 0xFF141710);
         Frame(number, edit.typing || hit(number) ? Bronze : Rule);
-        const int sliderY = slider.y + slider.height / 2;
         const int amount = edit.typing ? InventoryLayout::QuantityFromText(edit.digits, edit.maximum) : edit.amount;
-        const int thumb = InventoryLayout::QuantityPosition(slider, amount, edit.maximum);
-        Fill({slider.x, sliderY - 2, slider.width, 4}, Rule);
-        Fill({slider.x, sliderY - 2, thumb - slider.x + 1, 4}, Bronze);
-        Fill({thumb - 3, sliderY - 7, 7, 14}, Bright);
+        DrawQuantitySlider(slider, amount, edit.maximum);
         Fill(confirm, 0xFF35351F);
         Frame(confirm, hit(confirm) ? Bright : Bronze);
         Frame(cancel, hit(cancel) ? Bright : Rule);
@@ -735,7 +739,7 @@ public:
             else if (number.Hit(p.x, p.y)) {
                 if (!quantity->typing) quantity->digits = std::to_string(quantity->amount);
                 quantity->typing = quantity->replaceText = true;
-            } else if (slider.Hit(p.x, p.y)) {
+            } else if (InventoryLayout::QuantitySliderHitArea(slider).Hit(p.x, p.y)) {
                 quantity->typing = false;
                 quantity->dragging = true;
                 DragQuantity(p, true);

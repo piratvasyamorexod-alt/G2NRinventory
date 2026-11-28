@@ -199,13 +199,7 @@ class TradePanel {
             const auto count = (deal->typing ? deal->digits + "|" : std::to_string(selected)) + " / " + std::to_string(lot.amount);
             if (lot.amount > 1) Control(number, count, point);
             else ui.Text(x, number.y, count, w);
-            if (lot.amount > 1) {
-                const int thumb = InventoryLayout::QuantityPosition(slider, selected, lot.amount);
-                const int center = slider.y + slider.height / 2;
-                ui.Fill({slider.x, center - 2, slider.width, 4}, Rule);
-                ui.Fill({slider.x, center - 2, thumb - slider.x + 1, 4}, Bronze);
-                ui.Fill({thumb - 3, center - 7, 7, 14}, Bright);
-            }
+            if (lot.amount > 1) ui.DrawQuantitySlider(slider, selected, lot.amount);
         }
         ui.Text(x, card.y + 13 + 4 * h, ui.Label(L"Золото", "Gold") + "  " + (deal->buy ? "-" : "+") + std::to_string(total), w, Bright);
         Control(confirm, ui.Label(L"Подтвердить", "Confirm"), point);
@@ -367,7 +361,7 @@ public:
                 if (number.Hit(point.x, point.y)) {
                     if (!deal->typing) deal->digits = std::to_string(deal->amount);
                     deal->typing = deal->replaceText = true;
-                } else if (slider.Hit(point.x, point.y)) {
+                } else if (InventoryLayout::QuantitySliderHitArea(slider).Hit(point.x, point.y)) {
                     deal->typing = false;
                     deal->dragging = true;
                     DragQuantity(point, true);
