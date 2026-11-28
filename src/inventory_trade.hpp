@@ -593,8 +593,9 @@ public:
                 if (!entry) continue;
                 const auto cell = side.grid.Cell(slot);
                 Place(ui.preview, {cell.x + 3, cell.y + 4, cell.width - 6, cell.height - 9});
-                entry->item->RenderItem(pair.Side(i).rndWorld, &ui.preview, 0.0f);
-                ui.DrawMissingVisualName(*entry->item, entry->entry.quantity, cell);
+                if (!DrawItemPreview(*entry->item, pair.Side(i).rndWorld, ui.preview)) {
+                    ui.DrawMissingVisualName(*entry->item, entry->entry.quantity, cell);
+                }
             }
         }
         oCItem::SetLightingSwell(TRUE);

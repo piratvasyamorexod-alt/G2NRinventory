@@ -131,6 +131,31 @@ void InitSprite(zCView& view, const char* name, int alpha = 255) {
     view.SetTransparency(alpha);
 }
 
+bool DrawItemPreview(oCItem& item, zCWorld* world, zCView& view) {
+    auto* visual = item.GetVisual();
+    zCProgMeshProto* mesh = nullptr;
+    if (visual) {
+        auto* type = visual->_GetClassDef();
+        if (zCObject::CheckInheritance(zCProgMeshProto::classDef, type)) {
+            mesh = static_cast<zCProgMeshProto*>(visual);
+        } else if (zCObject::CheckInheritance(zCMorphMesh::classDef, type)) {
+            mesh = static_cast<zCMorphMesh*>(visual)->morphMesh;
+        }
+    }
+    bool ready = true;
+    if (mesh && mesh->subMeshList && mesh->numSubMeshes > 0) {
+        ready = false;
+        for (int i = 0; i < mesh->numSubMeshes; ++i) {
+            auto* material = mesh->subMeshList[i].material;
+            auto* texture = material ? material->GetAniTexture() : nullptr;
+            // Start loading before the preview pass without waiting on the resource thread.
+            if (!texture || texture->CacheIn(0.6f) == zRES_CACHED_IN) ready = true;
+        }
+    }
+    item.RenderItem(world, &view, 0.0f);
+    return ready && item.GetVisual();
+}
+
 #include "inventory_hotbar.hpp"
 
 struct DamageLabel { const wchar_t* ru; const char* en; };
@@ -359,7 +384,6 @@ class InventoryPanel {
     static int MarkerSize(Box cell) { return std::clamp(cell.width / 3, 13, 24); }
 
     void DrawMissingVisualName(oCItem& item, int amount, Box cell) {
-        if (item.GetVisual()) return;
         const int amountSpace = amount > 1 ? Width(std::to_string(amount)) : 0;
         Text(cell.x + 4, cell.Bottom() - lineHeight, item.name.ToChar(), cell.width - 10 - amountSpace);
     }
@@ -936,9 +960,7 @@ public:
             if (!item) continue;
             const auto cell = grid.Cell(slot);
             Place(preview, {cell.x + 3, cell.y + 4, cell.width - 6, cell.height - 9});
-            // The native preview world can load a visual when the item is added to it.
-            item->RenderItem(inv.rndWorld, &preview, 0.0f);
-            DrawMissingVisualName(*item, Amount(first + slot), cell);
+            if (!DrawItemPreview(*item, inv.rndWorld, preview)) DrawMissingVisualName(*item, Amount(first + slot), cell);
         }
         oCItem::SetLightingSwell(TRUE);
         zrenderer->SetAlphaBlendSource(zRND_ALPHA_SOURCE_MATERIAL);
@@ -1008,7 +1030,7 @@ class InventorySession {
     bool PrepareMouse() {
         const bool focused = InventoryMouse::HasFocus(window);
         if (events.TakeFocusLoss() || !focused) {
-            ReleaseMouse();
+            ReleaseMouse(focused);
             // The focus message already discarded old events. If focus is
             // back, any newly buffered clicks belong to the active window.
             if (!focused) events.Discard();
@@ -1196,8 +1218,8 @@ HotbarPanel& GetHotbar() {
     return *hotbar;
 }
 
-void ReleaseInventoryUi() {
-    CloseSession(false);
+void ReleaseInventoryUi(bool reacquireMouse = false) {
+    CloseSession(reacquireMouse);
     delete std::exchange(hotbar, nullptr);
     functionHeld.fill(false);
 }
@@ -1430,10 +1452,10 @@ auto MainMenuHook = Union::CreateHook(
     SIGNATURE_OF(&CGameManager::Menu), &InventoryMainMenu, Union::HookType::Hook_Detours);
 
 void __fastcall InventoryMainMenu(CGameManager* manager, void* edx, int mode) {
-    // The main menu sets exitGame directly. Clean up before its caller
-    // unregisters menu views and starts dismantling the engine.
-    CloseSession(InventoryAvailable());
+    const bool restoreMouse = InventoryAvailable() && InventoryMouse::HasFocus(hWndApp);
     const bool previous = std::exchange(inMainMenu, true);
+    // The menu can start teardown before it returns. Release preview worlds and views first.
+    ReleaseInventoryUi(restoreMouse);
     MainMenuHook(manager, edx, mode);
     if (manager->exitGame) BeginInventoryShutdown();
     inMainMenu = previous;

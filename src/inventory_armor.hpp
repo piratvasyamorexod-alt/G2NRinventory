@@ -19,12 +19,16 @@ oCNpc* appearanceOwner = nullptr;
 const zCVisual* appearanceVisual = nullptr;
 const zCWorld* appearanceWorld = nullptr;
 bool appearanceDirty = false;
+bool appearanceOverridden = false;
+
+bool InventoryAvailable();
 
 void InvalidateArmorAppearance() { appearanceDirty = true; }
 
 bool CanStyleHero(oCNpc* npc) {
     constexpr int alteredBody = BS_MOD_TRANSFORMED | BS_MOD_CONTROLLED | BS_MOD_CONTROLLING;
-    return npc && npc == player && ogame && !ogame->inLoadSaveGame && npc->GetHomeWorld() && npc->GetVisual()
+    return npc && npc == player && ogame && InventoryAvailable() && !trackingPaused && !ogame->inLoadSaveGame
+        && npc->GetHomeWorld() && npc->GetVisual()
         && npc->IsHuman() && !(npc->GetBodyState() & alteredBody);
 }
 
@@ -62,10 +66,13 @@ auto InitArmorModelHook = Union::CreateHook(
     SIGNATURE_OF(&oCNpc::InitModel), &InitArmorModel, Union::HookType::Hook_Detours);
 
 void __fastcall InitArmorModel(oCNpc* npc, void* edx) {
+    if (npc != player || !InventoryAvailable()) {
+        InitArmorModelHook(npc, edx);
+        return;
+    }
     const auto& look = history.GetArmorLook();
-    const bool hero = CanStyleHero(npc);
     std::optional<ArmorVisualPass> pass;
-    if (hero && look) {
+    if (look && CanStyleHero(npc)) {
         const bool body = look->mesh.empty();
         const char* name = body ? npc->body_visualName.ToChar() : look->mesh.c_str();
         if (name && *name) pass.emplace(ArmorVisualPass{zSTRING(name), body ? npc->body_TexVarNr : look->texture});
@@ -73,22 +80,29 @@ void __fastcall InitArmorModel(oCNpc* npc, void* edx) {
     auto* outer = std::exchange(armorVisualPass, pass ? &*pass : nullptr);
     InitArmorModelHook(npc, edx);
     armorVisualPass = outer;
-    if (hero && npc == player) {
+    if (npc && npc == player) {
         appearanceOwner = npc;
         appearanceVisual = npc->GetVisual();
         appearanceWorld = npc->GetHomeWorld();
+        appearanceOverridden = pass && pass->model;
         appearanceDirty = false;
     }
 }
 
 void SyncArmorAppearance() {
-    if (!appearanceDirty && !history.GetArmorLook()) return;
+    const bool hasLook = history.GetArmorLook().has_value();
+    if (!hasLook && (!appearanceDirty || !appearanceOverridden)) return;
     if (!CanStyleHero(player)) {
         InvalidateArmorAppearance();
         return;
     }
-    if (appearanceDirty || appearanceOwner != player || appearanceVisual != player->GetVisual()
-        || appearanceWorld != player->GetHomeWorld()) {
+    const bool newModel = appearanceOwner != player || appearanceVisual != player->GetVisual()
+        || appearanceWorld != player->GetHomeWorld();
+    if (!hasLook && newModel) {
+        appearanceDirty = appearanceOverridden = false;
+        return;
+    }
+    if (appearanceDirty || newModel) {
         player->InitModel();
     }
 }

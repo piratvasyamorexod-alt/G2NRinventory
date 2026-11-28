@@ -164,7 +164,7 @@ class HotbarPanel {
             world->m_bIsInventoryWorld = TRUE;
         }
         Place(preview, box);
-        item.RenderItem(inv.rndWorld ? inv.rndWorld : world, &preview, 0.0f);
+        DrawItemPreview(item, inv.rndWorld ? inv.rndWorld : world, preview);
     }
 
 public:
