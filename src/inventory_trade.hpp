@@ -50,7 +50,7 @@ class TradePanel {
     std::string status;
 
     int SellPrice(oCViewDialogTrade& dialog, oCItem& item) const {
-        if (item.GetInstance() == currency || (item.flags & (ITM_FLAG_ACTIVE | ITM_FLAG_MI))) return 0;
+        if (item.GetInstance() == currency || !CanMoveSaleItem(item, false)) return 0;
         return InventoryTrade::SalePrice(item.GetValue(), dialog.DlgInventoryNpc->ValueMultiplier);
     }
 
@@ -503,11 +503,7 @@ public:
                 const auto cell = side.grid.Cell(slot);
                 Place(ui.preview, {cell.x + 3, cell.y + 4, cell.width - 6, cell.height - 9});
                 entry->item->RenderItem(Container(dialog, i)->rndWorld, &ui.preview, 0.0f);
-                if (!entry->item->GetVisual()) {
-                    const int labelWidth = cell.width - 10 - (entry->entry.quantity > 1
-                        ? ui.Width(std::to_string(entry->entry.quantity)) : 0);
-                    ui.Text(cell.x + 4, cell.Bottom() - h, entry->item->name.ToChar(), labelWidth);
-                }
+                ui.DrawMissingVisualName(*entry->item, entry->entry.quantity, cell);
             }
         }
         oCItem::SetLightingSwell(TRUE);

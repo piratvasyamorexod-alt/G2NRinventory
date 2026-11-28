@@ -46,6 +46,12 @@ Category Classify(const oCItem& item) {
     return Category::Other;
 }
 
+bool IsQuestItem(const oCItem& item) { return (item.flags & ITM_FLAG_MI) != 0; }
+
+bool CanMoveSaleItem(const oCItem& item, bool returning) {
+    return !(item.flags & ITM_FLAG_ACTIVE) && (returning || !IsQuestItem(item));
+}
+
 bool MissingRequirements(const oCItem& item) {
     constexpr auto equipment = ITM_CAT_NF | ITM_CAT_FF | ITM_CAT_ARMOR | ITM_CAT_RUNE;
     constexpr auto accessories = ITM_FLAG_SHIELD | ITM_FLAG_RING | ITM_FLAG_AMULET | ITM_FLAG_BELT;
@@ -151,6 +157,7 @@ class InventoryPanel {
     zCView unreadMarker{0, 0, 8, 8};
     zCView readMarker{0, 0, 8, 8};
     zCView equippedMarker{0, 0, 8, 8};
+    zCView questMarker{0, 0, 8, 8};
     std::array<zCView, CategoryCount> tabIcons;
     Box bounds, close, listBar;
     InventoryLayout::FittedTabs tabs;
@@ -263,14 +270,25 @@ class InventoryPanel {
         sprite.Blit();
     }
 
+    static int MarkerSize(Box cell) { return std::clamp(cell.width / 3, 13, 24); }
+
+    void DrawMissingVisualName(oCItem& item, int amount, Box cell) {
+        if (item.GetVisual()) return;
+        const int badgeSpace = IsQuestItem(item) && questMarker.backTex ? MarkerSize(cell) : 0;
+        const int amountSpace = amount > 1 ? Width(std::to_string(amount)) : 0;
+        Text(cell.x + 4 + badgeSpace, cell.Bottom() - lineHeight, item.name.ToChar(),
+             cell.width - 10 - amountSpace - badgeSpace);
+    }
+
     void DrawItemMarkers(oCItem& item, Box cell) {
-        const int size = std::clamp(cell.width / 3, 13, 24);
+        const int size = MarkerSize(cell);
         if (item.flags & ITM_FLAG_ACTIVE) DrawMarker(equippedMarker, cell.x + 2, cell.y + 2, size);
         if (MissingRequirements(item)) DrawMarker(lockedMarker, cell.Right() - size - 2, cell.y + 2, size);
         else if (ReadableDocument(item)) {
             auto& marker = history.WasRead(item.GetInstance()) ? readMarker : unreadMarker;
             DrawMarker(marker, cell.Right() - size - 2, cell.y + 2, size);
         }
+        if (IsQuestItem(item)) DrawMarker(questMarker, cell.x + 2, cell.Bottom() - size - 2, size);
     }
 
     void DrawTabs(const InventoryLayout::FittedTabs& layout, Category current,
@@ -374,6 +392,7 @@ class InventoryPanel {
         };
         const std::string name = item.name.ToChar();
         wrap(name, Bright);
+        if (IsQuestItem(item)) wrap(Label(L"Квестовый предмет", "Quest item"), Bronze);
         if (item.flags & ITM_FLAG_ACTIVE) {
             wrap(Label(L"Экипировано", "Equipped"), Equipped);
         }
@@ -562,6 +581,7 @@ public:
         InitSprite(unreadMarker, "G2NRI_UNREAD.TGA");
         InitSprite(readMarker, "G2NRI_READ.TGA");
         InitSprite(equippedMarker, "G2NRI_EQUIPPED.TGA");
+        InitSprite(questMarker, "G2NRI_QUEST.TGA");
         for (int i = 0; i < CategoryCount; ++i) InitSprite(tabIcons[i], CategoryTextures[i]);
     }
 
@@ -676,7 +696,8 @@ public:
         if (quantity) {
             const auto it = std::find_if(entries.begin(), entries.end(), [&](const Entry& entry) {
                 auto* item = nativeItems[entry.nativeIndex];
-                return item == quantity->item && item->GetInstance() == quantity->instance && !(item->flags & ITM_FLAG_ACTIVE);
+                return item == quantity->item && item->GetInstance() == quantity->instance
+                    && CanMoveSaleItem(*item, quantity->returning);
             });
             if (it == entries.end()) quantity.reset();
             else {
@@ -763,7 +784,7 @@ public:
         SetSelection(index, false);
         const bool returning = category == Category::Sale;
         if (!shift) return returning ? Command::None : Command::Use;
-        if (item->flags & ITM_FLAG_ACTIVE) return Command::None;
+        if (!CanMoveSaleItem(*item, returning)) return Command::None;
         const int instance = item->GetInstance(), amount = Amount(index);
         if (amount == 1) MoveToSale(instance, amount, returning);
         else if (amount > 1) {
@@ -817,11 +838,7 @@ public:
             Place(preview, {cell.x + 3, cell.y + 4, cell.width - 6, cell.height - 9});
             // The native preview world can load a visual when the item is added to it.
             item->RenderItem(inv.rndWorld, &preview, 0.0f);
-            if (!item->GetVisual()) {
-                const int amount = Amount(first + slot);
-                const int labelWidth = cell.width - 10 - (amount > 1 ? Width(std::to_string(amount)) : 0);
-                Text(cell.x + 4, cell.Bottom() - lineHeight, item->name.ToChar(), labelWidth, Paper);
-            }
+            DrawMissingVisualName(*item, Amount(first + slot), cell);
         }
         oCItem::SetLightingSwell(TRUE);
         zrenderer->SetAlphaBlendSource(zRND_ALPHA_SOURCE_MATERIAL);
