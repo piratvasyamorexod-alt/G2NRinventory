@@ -135,6 +135,12 @@ private:
         lastLowLevel = {};
     }
 
+    void StopHooks() {
+        if (activeWindow == this) activeWindow = nullptr;
+        if (mouseHook) UnhookWindowsHookEx(std::exchange(mouseHook, nullptr));
+        if (windowHook) UnhookWindowsHookEx(std::exchange(windowHook, nullptr));
+    }
+
 public:
     MouseEvents() = default;
     MouseEvents(const MouseEvents&) = delete;
@@ -159,10 +165,15 @@ public:
         return true;
     }
 
+    bool Restart(HWND game) {
+        // Windows may have silently removed the low-level hook while the game
+        // was inactive. Keep messages already captured after focus returned.
+        StopHooks();
+        return Start(game);
+    }
+
     void Stop() {
-        if (activeWindow == this) activeWindow = nullptr;
-        if (mouseHook) UnhookWindowsHookEx(std::exchange(mouseHook, nullptr));
-        if (windowHook) UnhookWindowsHookEx(std::exchange(windowHook, nullptr));
+        StopHooks();
         Discard();
         lostFocus = false;
     }

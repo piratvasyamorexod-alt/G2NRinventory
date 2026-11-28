@@ -895,18 +895,21 @@ class InventorySession {
     }
 
     bool PrepareMouse() {
-        if (events.TakeFocusLoss() || !InventoryMouse::HasFocus(window)) {
+        const bool focused = InventoryMouse::HasFocus(window);
+        if (events.TakeFocusLoss() || !focused) {
             ReleaseMouse();
-            events.Discard();
+            // The focus message already discarded old events. If focus is
+            // back, any newly buffered clicks belong to the active window.
+            if (!focused) events.Discard();
             panel.DragQuantity(std::nullopt, false);
             trade.DragQuantity(std::nullopt, false);
             pressedItem.reset();
         }
-        if (!zinput || !InventoryMouse::HasFocus(window) || !InventoryMouse::ClientBounds(window, client)) {
+        if (!zinput || !focused || !InventoryMouse::ClientBounds(window, client)) {
             return false;
         }
         if (!active) {
-            if (!listening) listening = events.Start(window);
+            listening = events.Restart(window);
             restoreMouse = zinput->GetDeviceEnabled(zINPUT_MOUSE) != 0;
             if (restoreMouse) {
                 zinput->SetDeviceEnabled(zINPUT_MOUSE, FALSE);
