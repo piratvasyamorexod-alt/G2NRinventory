@@ -123,7 +123,7 @@ constexpr std::array<DamageLabel, NPC_ATR_MAX> AttributeLabels{{
 }};
 constexpr std::array<DamageLabel, CategoryCount> CategoryLabels{{
     {L"Последнее", "Recent"}, {L"Все", "All"}, {L"Оружие", "Weapons"}, {L"Броня", "Armor"}, {L"Снаряды", "Ammo"},
-    {L"Магия", "Magic"}, {L"Зелья", "Potions"}, {L"Припасы", "Supplies"}, {L"Записи", "Notes"},
+    {L"Магия", "Magic"}, {L"Зелья", "Potions"}, {L"Еда", "Food"}, {L"Записи", "Notes"},
     {L"Разное", "Other"}, {L"На продажу", "For sale"}
 }};
 constexpr std::array<const char*, CategoryCount> CategoryTextures{
