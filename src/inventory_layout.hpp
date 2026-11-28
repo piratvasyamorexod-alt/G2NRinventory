@@ -45,9 +45,22 @@ inline HotbarLayout PlaceHotbar(int width, int height) {
     return {{(width - barWidth) / 2, height - bottomMargin - barHeight, barWidth, barHeight}, size, gap, inset};
 }
 
-inline bool DraggedEnough(int x, int y, int initialX, int initialY, int threshold) {
-    return std::abs(x - initialX) >= threshold || std::abs(y - initialY) >= threshold;
-}
+class PointerMotion {
+    int originX, originY;
+    int distanceX = 0, distanceY = 0;
+
+public:
+    PointerMotion(int x, int y) : originX(x), originY(y) {}
+
+    void Extend(int x, int y) {
+        distanceX = (std::max)(distanceX, std::abs(x - originX));
+        distanceY = (std::max)(distanceY, std::abs(y - originY));
+    }
+
+    bool MovedBy(int thresholdX, int thresholdY) const {
+        return distanceX >= thresholdX || distanceY >= thresholdY;
+    }
+};
 
 struct FittedTabs {
     std::array<Box, static_cast<int>(Category::Count)> cells{};

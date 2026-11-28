@@ -848,7 +848,7 @@ class InventorySession {
     struct Press {
         oCItem* item;
         int instance;
-        POINT initial;
+        InventoryLayout::PointerMotion motion;
         bool dragging = false;
     };
     std::optional<Press> pressedItem;
@@ -968,13 +968,15 @@ public:
             if (!panel.QuantityKey(KEY_ESCAPE, inv)) return Command::Close;
             return Command::None;
         }
-        const auto click = ClickPoint(input.leftClick, VK_LBUTTON, leftHeld);
         const auto wheel = ScreenPoint(input.wheelPosition);
         const auto point = Position();
         const bool held = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+        const bool wasHeld = std::exchange(leftHeld, held);
+        const auto click = listening ? ScreenPoint(input.leftClick) : held && !wasHeld ? point : std::nullopt;
+        const bool released = listening ? input.leftRelease.has_value() : wasHeld && !held;
+        const auto pointer = listening && released ? ScreenPoint(input.leftRelease) : point;
         panel.DragQuantity(point, held);
-        const bool release = input.leftRelease.has_value() || !held;
-        if (click || (pressedItem && release) || (wheel && input.wheel)) {
+        if (click || (pressedItem && released) || (wheel && input.wheel)) {
             panel.Layout();
             panel.Refresh(inv);
         }
@@ -982,17 +984,24 @@ public:
         if (click) {
             pressedItem.reset();
             if (!shift) {
-                if (auto* item = panel.PressSource(*click)) pressedItem = Press{item, item->GetInstance(), *click};
+                if (auto* item = panel.PressSource(*click)) {
+                    pressedItem = Press{item, item->GetInstance(), {click->x, click->y}};
+                }
             }
             if (!pressedItem) return panel.Click(*click, shift, inv);
         }
         if (pressedItem) {
-            const auto pointer = input.leftRelease ? ScreenPoint(input.leftRelease) : point;
             const int threshold = std::clamp(screen->psizey / 160, 4, 9);
-            if (pointer && InventoryLayout::DraggedEnough(pointer->x, pointer->y, pressedItem->initial.x, pressedItem->initial.y, threshold)) {
-                pressedItem->dragging = true;
+            if (input.leftMotion) {
+                const int thresholdX = (std::max)(1, MulDiv(threshold, client.right - client.left, screen->psizex));
+                const int thresholdY = (std::max)(1, MulDiv(threshold, client.bottom - client.top, screen->psizey));
+                pressedItem->dragging |= input.leftMotion->MovedBy(thresholdX, thresholdY);
             }
-            if (!release) return Command::None;
+            if (pointer && (held || released)) {
+                pressedItem->motion.Extend(pointer->x, pointer->y);
+                pressedItem->dragging |= pressedItem->motion.MovedBy(threshold, threshold);
+            }
+            if (!released) return Command::None;
             auto* dragged = DraggedItem(inv);
             const auto started = *std::exchange(pressedItem, std::nullopt);
             if (!pointer) return Command::None;

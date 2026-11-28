@@ -110,9 +110,22 @@ int main() {
             assert(bar.Hit(cell.Right(), cell.y) == -1);
         }
     }
-    assert(!DraggedEnough(102, 96, 100, 100, 6));
-    assert(DraggedEnough(94, 100, 100, 100, 6));
-    assert(DraggedEnough(100, 107, 100, 100, 6));
+    PointerMotion shortClick(100, 100);
+    shortClick.Extend(102, 96);
+    shortClick.Extend(98, 104);
+    assert(!shortClick.MovedBy(6, 6));
+
+    PointerMotion roundTrip(100, 100);
+    roundTrip.Extend(94, 100);
+    roundTrip.Extend(100, 100);
+    assert(roundTrip.MovedBy(6, 6));
+    assert(!roundTrip.MovedBy(7, 6));
+
+    PointerMotion vertical(100, 100);
+    vertical.Extend(101, 107);
+    vertical.Extend(100, 100);
+    assert(vertical.MovedBy(9, 6));
+    assert(!vertical.MovedBy(9, 8));
 
     const int rowHeight = 32;
     for (const bool hero : {true, false}) {

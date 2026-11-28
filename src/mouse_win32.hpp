@@ -6,6 +6,8 @@
 #include <optional>
 #include <utility>
 
+#include "inventory_layout.hpp"
+
 #pragma comment(lib, "comctl32.lib")
 
 namespace InventoryMouse {
@@ -31,6 +33,7 @@ class MouseEvents {
 public:
     struct State {
         std::optional<POINT> leftClick, leftRelease, rightClick, wheelPosition;
+        std::optional<InventoryLayout::PointerMotion> leftMotion;
         int wheel = 0;
         bool leftShift = false;
     };
@@ -42,14 +45,20 @@ private:
     bool lostFocus = false;
     struct MouseEvent { POINT at; DWORD time; int delta; };
     std::array<std::optional<MouseEvent>, 4> lastLowLevel;
+    std::optional<InventoryLayout::PointerMotion> leftMotion;
     State pending;
     int wheelDelta = 0;
 
-    static bool IsMouseAction(UINT message) {
-        return message == WM_LBUTTONDOWN || message == WM_LBUTTONUP || message == WM_RBUTTONDOWN || message == WM_MOUSEWHEEL;
+    bool Watches(UINT message) const {
+        return message == WM_LBUTTONDOWN || message == WM_LBUTTONUP || message == WM_RBUTTONDOWN
+            || message == WM_MOUSEWHEEL || (message == WM_MOUSEMOVE && leftMotion.has_value());
     }
 
     void Record(UINT message, POINT at, int delta, DWORD time, bool lowLevel) {
+        if (message == WM_MOUSEMOVE) {
+            if (leftMotion) leftMotion->Extend(at.x, at.y);
+            return;
+        }
         const int index = message == WM_LBUTTONDOWN ? 0 : message == WM_LBUTTONUP ? 1 : message == WM_RBUTTONDOWN ? 2 : 3;
         auto& previous = lastLowLevel[index];
         if (lowLevel) {
@@ -63,10 +72,16 @@ private:
         case WM_LBUTTONDOWN:
             pending.leftClick = at;
             pending.leftRelease.reset();
+            pending.leftMotion.reset();
+            leftMotion.emplace(at.x, at.y);
             pending.leftShift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
             break;
         case WM_LBUTTONUP:
-            pending.leftRelease = at;
+            if (leftMotion) {
+                leftMotion->Extend(at.x, at.y);
+                pending.leftMotion = std::exchange(leftMotion, std::nullopt);
+                pending.leftRelease = at;
+            }
             break;
         case WM_RBUTTONDOWN:
             pending.rightClick = at;
@@ -79,8 +94,8 @@ private:
     }
 
     static LRESULT CALLBACK Observe(int code, WPARAM message, LPARAM data) {
-        if (code == HC_ACTION && activeWindow && HasFocus(activeWindow->window)
-            && IsMouseAction(static_cast<UINT>(message))) {
+        if (code == HC_ACTION && activeWindow && activeWindow->Watches(static_cast<UINT>(message))
+            && HasFocus(activeWindow->window)) {
             auto& mouse = *activeWindow;
             const auto& input = *reinterpret_cast<const MSLLHOOKSTRUCT*>(data);
             mouse.Record(static_cast<UINT>(message), input.pt,
@@ -98,7 +113,7 @@ private:
                     || (message.message == WM_ACTIVATE && LOWORD(message.wParam) == WA_INACTIVE)) {
                     mouse.lostFocus = true;
                     mouse.ClearPending();
-                } else if (IsMouseAction(message.message) && HasFocus(mouse.window)) {
+                } else if (mouse.Watches(message.message) && HasFocus(mouse.window)) {
                     // Some wrappers deliver mouse input directly to the window.
                     POINT at{static_cast<short>(LOWORD(message.lParam)),
                              static_cast<short>(HIWORD(message.lParam))};
@@ -115,6 +130,7 @@ private:
 
     void ClearPending() {
         pending = {};
+        leftMotion.reset();
         wheelDelta = 0;
         lastLowLevel = {};
     }
@@ -162,6 +178,7 @@ public:
     State Take() {
         pending.wheel = wheelDelta / WHEEL_DELTA;
         wheelDelta -= pending.wheel * WHEEL_DELTA;
+        if (leftMotion) pending.leftMotion = leftMotion;
         return std::exchange(pending, State{});
     }
 };
