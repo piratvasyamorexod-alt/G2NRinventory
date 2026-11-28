@@ -217,7 +217,7 @@ class InventoryPanel {
                 Label(L"Надеть как скин", "Use as appearance")};
     }
 
-    Box ArmorMenuBounds(const ArmorLabels& options) const {
+    Box ArmorMenuBounds(const ArmorLabels& options) {
         constexpr int pad = 8;
         int width = 0;
         for (const auto& option : options) width = (std::max)(width, Width(option) + 4 * pad);
