@@ -359,7 +359,11 @@ public:
         };
         std::map<int, int> reserved;
         std::array<bool, InventoryHistory::History::MaximumRecent> recentSeen{};
-        bool cyrillic = false;
+        const auto hasCyrillic = [](std::string_view name) {
+            return std::any_of(name.begin(), name.end(), [](unsigned char c) { return c >= 0xC0; });
+        };
+        const auto sourceName = pair.shop ? pair.shop->NpcLeft->name[0] : pair.other->GetName();
+        bool cyrillic = hasCyrillic(sourceName.ToChar());
         for (int i = 0; i < 2; ++i) {
             auto& side = sides[i];
             const bool hero = i == 1;
@@ -368,10 +372,7 @@ public:
             for (auto* node = pair.Side(i).contents->GetNextInList(); node; node = node->GetNextInList()) {
                 auto* item = node->GetData();
                 if (!item || item->amount <= 0) continue;
-                if (!cyrillic) {
-                    const std::string_view name(item->name.ToChar());
-                    cyrillic = std::any_of(name.begin(), name.end(), [](unsigned char c) { return c >= 0xC0; });
-                }
+                if (!cyrillic) cyrillic = hasCyrillic(item->name.ToChar());
                 const int instance = item->GetInstance();
                 if (pair.shop && instance == currency) {
                     if (hero) wallet += item->amount;

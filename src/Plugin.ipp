@@ -1146,16 +1146,26 @@ void TakeFromNpc(oCItemContainer& source, oCItem* expected) {
 
 void CloseLoot(oCItemContainer* loot) {
     CloseSession();
-    if (ActiveLoot() != loot) return;
+    if (!loot || ActiveLoot() != loot) return;
     if (loot->GetMode() == INV_MODE_PLUNDER) {
         player->CloseDeadNpc();
         return;
     }
-    // The end handler closes the engine views and finishes the interaction.
-    if (!loot->IsActive()) loot->Activate();
-    zCArray<unsigned short> keys;
-    if (zinput && zinput->GetBinding(zLOGICKEY_END, keys) && keys.GetNum() > 0) loot->HandleEvent(keys[0]);
-    else loot->HandleEvent(KEY_ESCAPE);
+    if (loot->GetMode() == INV_MODE_STEAL) {
+        if (auto* victim = static_cast<oCStealContainer*>(loot)->GetOwner()) {
+            victim->StopTheft(player, FALSE);
+            return;
+        }
+    }
+    loot->Close();
+    player->CloseInventory();
+    // Close the chest through the same state change as the engine's End key.
+    if (auto* mob = player->GetInteractMob()) {
+        auto* message = new oCMobMsg(oCMobMsg::EV_STARTSTATECHANGE, player);
+        message->from = mob->GetState();
+        message->to = message->from - 1;
+        mob->GetEM()->OnMessage(message, player);
+    }
 }
 
 void UseSelected(oCNpcInventory& inv) {
